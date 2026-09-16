@@ -707,7 +707,9 @@ impl ApiGateway {
             description: config.openapi.description.clone(),
             servers: (!prefix.is_empty()).then_some(prefix).into_iter().collect(),
         };
-        let mut openapi = self.openapi_registry.build_openapi(&info)?;
+        let mut openapi = self
+            .openapi_registry
+            .build_openapi_with_tags(&info, &config.openapi.tags)?;
         enrich_openapi_with_zone_limits(&mut openapi, &config);
         Ok(openapi)
     }

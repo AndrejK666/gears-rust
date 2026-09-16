@@ -32,6 +32,23 @@ use toolkit_contract::StreamFraming;
 /// Type alias for schema collections used in API operations.
 type SchemaCollection = Vec<(String, RefOr<Schema>)>;
 
+/// One entry of the document-level `tags` list.
+///
+/// An operation declares the tag it belongs to; this declares the *group* that
+/// tag names — the order it appears in, and what it is for. Documentation
+/// browsers read the document-level list to order and describe the groups in
+/// their sidebar, and fall back to first-appearance order when it is absent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenApiTag {
+    /// Must match the tag an operation declares, or the entry describes nothing.
+    pub name: String,
+    /// Shown under the group heading. Optional, and worth writing: it is the
+    /// only place a whole domain can be explained rather than an endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// `OpenAPI` document metadata (title, version, description)
 #[derive(Debug, Clone)]
 pub struct OpenApiInfo {
@@ -50,6 +67,30 @@ impl Default for OpenApiInfo {
             servers: Vec::new(),
         }
     }
+}
+
+/// The document-level `tags` list, or `None` when the caller declared no groups.
+///
+/// `None` rather than an empty vector on purpose: an empty list serialises as
+/// `tags: []`, which is not the same document as one with no `tags` key.
+/// [`OpenApiRegistryImpl::build_openapi`] passes an empty slice, so every
+/// caller that predates groups keeps the document it already had — an added
+/// empty array would surface as a diff in every committed `OpenAPI` snapshot
+/// downstream.
+fn document_tags(tags: &[OpenApiTag]) -> Option<Vec<utoipa::openapi::Tag>> {
+    if tags.is_empty() {
+        return None;
+    }
+
+    Some(
+        tags.iter()
+            .map(|tag| {
+                let mut built = utoipa::openapi::Tag::new(&tag.name);
+                built.description.clone_from(&tag.description);
+                built
+            })
+            .collect(),
+    )
 }
 
 /// `OpenAPI` registry trait for operation and schema registration
@@ -180,13 +221,43 @@ impl OpenApiRegistryImpl {
 
     /// Build `OpenAPI` specification from registered operations and components.
     ///
+    /// The document carries no `tags` list; see [`Self::build_openapi_with_tags`]
+    /// to declare the order and the descriptions of its groups.
+    ///
     /// # Arguments
     /// * `info` - `OpenAPI` document metadata (title, version, description)
     ///
     /// # Errors
     /// Returns an error if the `OpenAPI` specification cannot be built.
-    #[allow(unknown_lints, de0205_operation_builder)]
     pub fn build_openapi(&self, info: &OpenApiInfo) -> Result<OpenApi> {
+        self.build_openapi_with_tags(info, &[])
+    }
+
+    /// Build the specification, declaring the document-level tag groups.
+    ///
+    /// An operation declares the tag it belongs to; `tags` here declares the
+    /// groups those tags name — the order a reader meets them in, and what each
+    /// is for. Documentation browsers read this list to order and describe the
+    /// groups, and fall back to the order the tags first appear in when it is
+    /// absent.
+    ///
+    /// The list is a preference, not a whitelist: a tag an operation uses but
+    /// this list omits is still grouped, after the declared ones. Pass an empty
+    /// slice — as [`Self::build_openapi`] does — and the document carries no
+    /// `tags` key at all.
+    ///
+    /// # Arguments
+    /// * `info` - `OpenAPI` document metadata (title, version, description)
+    /// * `tags` - document-level groups, in presentation order
+    ///
+    /// # Errors
+    /// Returns an error if the `OpenAPI` specification cannot be built.
+    #[allow(unknown_lints, de0205_operation_builder)]
+    pub fn build_openapi_with_tags(
+        &self,
+        info: &OpenApiInfo,
+        tags: &[OpenApiTag],
+    ) -> Result<OpenApi> {
         use http::Method;
 
         // Log operation count for visibility
@@ -404,6 +475,7 @@ impl OpenApiRegistryImpl {
             .servers(servers)
             .paths(paths.build())
             .components(Some(components.build()))
+            .tags(document_tags(tags))
             .build();
 
         // Document-level vendor extension: this spec is generated from Rust
@@ -914,6 +986,68 @@ mod tests {
         assert_eq!(
             openapi_info.get("description").unwrap(),
             "Test API Description"
+        );
+    }
+
+    /// A document nobody gave groups to carries no `tags` key at all.
+    ///
+    /// Not `tags: []`. `build_openapi` is unchanged for every caller that had
+    /// it before groups existed, and "unchanged" has to mean the bytes too —
+    /// an added empty array is a diff in every committed snapshot downstream.
+    #[test]
+    fn no_declared_groups_means_no_tags_key() {
+        let registry = OpenApiRegistryImpl::new();
+        let doc = registry.build_openapi(&OpenApiInfo::default()).unwrap();
+        let json = serde_json::to_value(&doc).unwrap();
+
+        assert!(
+            json.get("tags").is_none(),
+            "an undeclared tag list must not appear in the document: {json}"
+        );
+    }
+
+    /// Declared groups reach the document in the order they were declared.
+    ///
+    /// The order is the whole point: a documentation browser presents the
+    /// groups in document order and falls back to first-appearance order when
+    /// the list is absent, which in an assembly means whatever the path
+    /// alphabet happened to produce.
+    #[test]
+    fn declared_groups_keep_their_order_and_descriptions() {
+        let registry = OpenApiRegistryImpl::new();
+        let groups = [
+            OpenApiTag {
+                name: "Zulu".to_owned(),
+                description: Some("Last alphabetically, first on purpose.".to_owned()),
+            },
+            OpenApiTag {
+                name: "Alpha".to_owned(),
+                description: None,
+            },
+        ];
+
+        let doc = registry
+            .build_openapi_with_tags(&OpenApiInfo::default(), &groups)
+            .unwrap();
+        let json = serde_json::to_value(&doc).unwrap();
+        let tags = json
+            .get("tags")
+            .expect("declared groups reach the document");
+
+        assert_eq!(
+            tags.as_array().map(Vec::len),
+            Some(2),
+            "both declared groups are present: {tags}"
+        );
+        assert_eq!(tags[0].get("name").unwrap(), "Zulu");
+        assert_eq!(tags[1].get("name").unwrap(), "Alpha");
+        assert_eq!(
+            tags[0].get("description").unwrap(),
+            "Last alphabetically, first on purpose."
+        );
+        assert!(
+            tags[1].get("description").is_none(),
+            "a group with nothing to say carries no description key: {tags}"
         );
     }
 

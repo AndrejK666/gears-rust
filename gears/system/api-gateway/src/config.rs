@@ -349,6 +349,28 @@ pub struct OpenApiConfig {
     /// API description (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Document-level tag groups, in the order a reader should meet them.
+    ///
+    /// An assembly links gears it does not own, so the tags in its document
+    /// come from several authors and no single one of them can decide the
+    /// order. The deployment can, and this is where it says so. Omit it and
+    /// the document carries no `tags` key, exactly as before.
+    ///
+    /// ```yaml
+    /// openapi:
+    ///   title: "Constructor Studio Backend"
+    ///   version: "0.1.0"
+    ///   tags:
+    ///     - name: StudioDocuments
+    ///       description: "Documents, their bindings and the types they carry."
+    ///     - name: StudioTasks
+    ///       description: "Background runs: state, attempts, cancel and retry."
+    /// ```
+    ///
+    /// A tag an operation uses but this list omits is not hidden — it is
+    /// grouped as it always was, after the ones named here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<toolkit::api::OpenApiTag>,
 }
 
 impl Default for OpenApiConfig {
@@ -357,6 +379,7 @@ impl Default for OpenApiConfig {
             title: "API Documentation".to_owned(),
             version: "0.1.0".to_owned(),
             description: None,
+            tags: Vec::new(),
         }
     }
 }
