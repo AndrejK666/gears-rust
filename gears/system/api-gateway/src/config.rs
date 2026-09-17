@@ -373,6 +373,22 @@ pub struct OpenApiConfig {
     pub tags: Vec<toolkit::api::OpenApiTag>,
 }
 
+impl OpenApiConfig {
+    /// Reject a tag list that cannot make a valid document.
+    ///
+    /// Called from `Gear::init`, beside the other config checks, so a blank or
+    /// duplicated group name is a startup error naming the offending entry
+    /// rather than an invalid `openapi.json` served to every reader.
+    ///
+    /// # Errors
+    /// Returns an error on a blank or over-long group name, an over-long
+    /// description, a duplicate name, or more groups than the document allows.
+    pub fn validate(&self) -> Result<(), String> {
+        toolkit::api::validate_tags(&self.tags)
+            .map_err(|e| format!("invalid openapi configuration: {e}"))
+    }
+}
+
 impl Default for OpenApiConfig {
     fn default() -> Self {
         Self {
@@ -660,7 +676,84 @@ fn validate_status(zone: &str, status: u16) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::GatewayProxyConfig;
+    use super::{GatewayProxyConfig, OpenApiConfig};
+
+    /// The operator-facing shape actually deserialises into the field.
+    ///
+    /// The registry tests build `OpenApiTag` as a Rust literal, which says
+    /// nothing about whether serde agrees with the key names an operator
+    /// types. Driven through JSON rather than YAML because that is the
+    /// deserialiser this crate carries; it is the same `Deserialize` impl.
+    #[test]
+    fn openapi_tags_deserialise_from_config() {
+        let cfg: OpenApiConfig = serde_json::from_value(serde_json::json!({
+            "title": "Example Assembly",
+            "version": "0.1.0",
+            "tags": [
+                { "name": "Orders", "description": "Placing an order, and what happens after." },
+                { "name": "Tenants" },
+            ],
+        }))
+        .expect("the documented config shape parses");
+
+        assert_eq!(cfg.tags.len(), 2);
+        assert_eq!(cfg.tags[0].name, "Orders");
+        assert_eq!(
+            cfg.tags[0].description.as_deref(),
+            Some("Placing an order, and what happens after.")
+        );
+        assert_eq!(cfg.tags[1].name, "Tenants");
+        assert!(
+            cfg.tags[1].description.is_none(),
+            "description is optional, and absent means absent"
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    /// Config written before groups existed still parses, and declares none.
+    #[test]
+    fn openapi_config_without_tags_is_still_valid() {
+        let cfg: OpenApiConfig = serde_json::from_value(serde_json::json!({
+            "title": "Example Assembly",
+            "version": "0.1.0",
+        }))
+        .expect("a config predating the key keeps parsing");
+
+        assert!(cfg.tags.is_empty());
+        assert!(cfg.validate().is_ok());
+    }
+
+    /// `Gear::init` refuses a list that cannot make a valid document.
+    #[test]
+    fn duplicate_openapi_tag_names_fail_validation() {
+        let cfg: OpenApiConfig = serde_json::from_value(serde_json::json!({
+            "title": "Example Assembly",
+            "version": "0.1.0",
+            "tags": [{ "name": "Orders" }, { "name": "Orders" }],
+        }))
+        .expect("it parses; it is validation that rejects it");
+
+        let error = cfg
+            .validate()
+            .expect_err("two groups with one name are not a document");
+        assert!(
+            error.contains("Orders"),
+            "the error names the offending group: {error}"
+        );
+    }
+
+    /// A blank name is rejected at load rather than served as an empty group.
+    #[test]
+    fn blank_openapi_tag_name_fails_validation() {
+        let cfg: OpenApiConfig = serde_json::from_value(serde_json::json!({
+            "title": "Example Assembly",
+            "version": "0.1.0",
+            "tags": [{ "name": "  " }],
+        }))
+        .expect("it parses; it is validation that rejects it");
+
+        assert!(cfg.validate().is_err());
+    }
 
     #[test]
     fn disabled_proxy_needs_no_endpoint() {

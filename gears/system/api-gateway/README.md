@@ -44,12 +44,18 @@ gears:
           - name: Tenants
 ```
 
+`name` is matched against an operation's tag by **exact string equality** — no
+trimming, no case folding. `Orders` and `orders` are two different groups, and
+one of them will be empty; a declared group that matches no operation is logged
+at startup for exactly this reason. Names must also be unique, and a blank or
+duplicated name fails `init` rather than reaching the served document.
+
 Omit the key and the document carries no `tags` list, which is what it did
 before the key existed: documentation browsers then fall back to the order the
 tags first appear in, which in an assembly is whatever the path alphabet
 produced. A tag an operation uses but the list omits is not hidden — it is
-grouped as it always was, after the ones named here, so the list only has to
-name the groups whose placement matters.
+emitted after the ones named here, so the list only has to name the groups whose
+placement matters.
 
 ## License
 

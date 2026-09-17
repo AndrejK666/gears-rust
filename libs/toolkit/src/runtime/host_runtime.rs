@@ -1440,6 +1440,11 @@ impl HostRuntime {
             description: None,
             servers: vec![],
         };
+        // `build_openapi`, not `build_openapi_with_tags`: declaring the order of
+        // the documentation groups is deliberately out of scope here. The
+        // in-process gateway takes the list from its own config, and
+        // `OopServeOptions` has no equivalent operator-facing surface to read
+        // one from. Give it one and this call site is where it is wired.
         let openapi = registry
             .build_openapi(&info)
             .context("OoP router: build OpenAPI document")?;
