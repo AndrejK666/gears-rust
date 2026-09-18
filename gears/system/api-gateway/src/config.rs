@@ -373,19 +373,66 @@ pub struct OpenApiConfig {
     pub tags: Vec<toolkit::api::OpenApiTag>,
 }
 
+/// Longest an `OpenAPI` document title or version may be.
+const MAX_OPENAPI_TITLE_LEN: usize = 200;
+/// Longest an `OpenAPI` document description may be.
+const MAX_OPENAPI_DESCRIPTION_LEN: usize = 4_000;
+
 impl OpenApiConfig {
-    /// Reject a tag list that cannot make a valid document.
+    /// Reject document metadata that cannot make a valid served document.
     ///
     /// Called from `Gear::init`, beside the other config checks, so a blank or
     /// duplicated group name is a startup error naming the offending entry
     /// rather than an invalid `openapi.json` served to every reader.
     ///
+    /// Every field here is operator text that reaches `/openapi.json` on an
+    /// anonymous route and the `/docs` page in a browser, so all four are
+    /// checked, not only `tags`: `title` and `version` land in the document's
+    /// `info` block and are read by every generated client.
+    ///
     /// # Errors
-    /// Returns an error on a blank or over-long group name, an over-long
-    /// description, a duplicate name, or more groups than the document allows.
-    pub fn validate(&self) -> Result<(), String> {
-        toolkit::api::validate_tags(&self.tags)
-            .map_err(|e| format!("invalid openapi configuration: {e}"))
+    /// Returns an error on a blank, over-long or control-character-bearing
+    /// title, version or description, and on a tag list that
+    /// [`toolkit::api::validate_tags`] rejects.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        use toolkit::api::validate_document_text;
+
+        if self.title.trim().is_empty() {
+            anyhow::bail!("invalid openapi configuration: `title` is blank");
+        }
+        if self.version.trim().is_empty() {
+            anyhow::bail!("invalid openapi configuration: `version` is blank");
+        }
+        if self.title.chars().count() > MAX_OPENAPI_TITLE_LEN {
+            anyhow::bail!(
+                "invalid openapi configuration: `title` is longer than \
+                 {MAX_OPENAPI_TITLE_LEN} characters"
+            );
+        }
+        if self.version.chars().count() > MAX_OPENAPI_TITLE_LEN {
+            anyhow::bail!(
+                "invalid openapi configuration: `version` is longer than \
+                 {MAX_OPENAPI_TITLE_LEN} characters"
+            );
+        }
+        validate_document_text("title", &self.title, false)
+            .context("invalid openapi configuration")?;
+        validate_document_text("version", &self.version, false)
+            .context("invalid openapi configuration")?;
+
+        if let Some(description) = &self.description {
+            if description.chars().count() > MAX_OPENAPI_DESCRIPTION_LEN {
+                anyhow::bail!(
+                    "invalid openapi configuration: `description` is longer than \
+                     {MAX_OPENAPI_DESCRIPTION_LEN} characters"
+                );
+            }
+            validate_document_text("description", description, true)
+                .context("invalid openapi configuration")?;
+        }
+
+        toolkit::api::validate_tags(&self.tags).context("invalid openapi configuration")
     }
 }
 
@@ -736,9 +783,12 @@ mod tests {
         let error = cfg
             .validate()
             .expect_err("two groups with one name are not a document");
+        // `{:#}` so the assertion reads the whole chain, not just the outermost
+        // context — the position comes from `validate_tags` underneath.
+        let error = format!("{error:#}");
         assert!(
-            error.contains("Orders"),
-            "the error names the offending group: {error}"
+            error.contains("#1"),
+            "the error points at the offending entry: {error}"
         );
     }
 

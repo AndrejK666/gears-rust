@@ -1219,7 +1219,7 @@ impl toolkit::Gear for ApiGateway {
         // Same reason for the documentation groups: a blank or duplicated tag name
         // makes an invalid OpenAPI document, and the only place anyone would notice
         // is a docs browser that quietly renders it wrong.
-        cfg.openapi.validate().map_err(|e| anyhow::anyhow!(e))?;
+        cfg.openapi.validate()?;
         self.config.store(Arc::new(cfg.clone()));
 
         debug!(
