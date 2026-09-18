@@ -41,8 +41,20 @@ gears:
         tags:
           - name: Orders
             description: "Placing an order, and everything that happens to it after."
+            external_docs:
+              url: "https://example.test/docs/orders"
+              description: "The long version."
+            extensions:
+              x-displayName: "Orders"
           - name: Tenants
 ```
+
+`external_docs` and `extensions` are optional. `extensions` is a nested map
+rather than `x-*` members written beside `name`, because the config rejects
+unknown keys — that is what turns a mistyped `descrption:` into a startup error
+instead of a group that quietly lost its description — and serde cannot combine
+that with a flattened catch-all. Extension names must start with `x-`, since
+every other member of an `OpenAPI` object belongs to the specification.
 
 `name` is matched against an operation's tag by **exact string equality** — no
 trimming, no case folding. `Orders` and `orders` are two different groups, and

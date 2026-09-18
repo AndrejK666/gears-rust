@@ -54,13 +54,36 @@ const MAX_DECLARED_TAGS: usize = 200;
 /// configuration. [`OpenApiTag::new`] is the checked way to build one in Rust,
 /// and [`validate_tags`] is what a config loader calls to reject a list that
 /// arrived some other way.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenApiTag {
     /// Exact-match name of the group. Must equal the tag an operation declares.
     pub name: String,
     /// Shown under the group heading. Optional, and worth writing: it is the
     /// only place a whole domain can be explained rather than an endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Where a reader goes for more than a description can hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_docs: Option<OpenApiExternalDocs>,
+    /// `x-*` members to emit on the group, for whatever reads the document.
+    ///
+    /// A named field rather than a flattened catch-all: serde cannot combine
+    /// `flatten` with `deny_unknown_fields`, and the deny is what turns a
+    /// mistyped `descrption:` into a startup error instead of a group that
+    /// silently lost its description. So an extension copied from an existing
+    /// spec is nested under this key rather than written beside `name`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+/// The `externalDocs` of a tag group: somewhere to send a reader.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenApiExternalDocs {
+    /// Target of the link. Required, and the only reason the object exists.
+    pub url: String,
+    /// What the reader will find there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -74,6 +97,8 @@ impl OpenApiTag {
         let tag = Self {
             name: name.into(),
             description: None,
+            external_docs: None,
+            extensions: BTreeMap::new(),
         };
         tag.validate()?;
         Ok(tag)
@@ -121,14 +146,46 @@ impl OpenApiTag {
             }
             validate_document_text("description", description, true)?;
         }
+
+        if let Some(docs) = &self.external_docs {
+            if docs.url.trim().is_empty() {
+                anyhow::bail!("the external documentation has no url");
+            }
+            if docs.url.chars().count() > MAX_TAG_DESCRIPTION_LEN {
+                anyhow::bail!(
+                    "the external documentation url is longer than \
+                     {MAX_TAG_DESCRIPTION_LEN} characters"
+                );
+            }
+            validate_document_text("external documentation url", &docs.url, false)?;
+            if let Some(description) = &docs.description {
+                validate_document_text("external documentation description", description, true)?;
+            }
+        }
+
+        for key in self.extensions.keys() {
+            // `OpenAPI` reserves every non-`x-` member of an object for the
+            // specification, so a key without the prefix is not an extension —
+            // it is a member this document is not allowed to invent.
+            if !key.starts_with("x-") {
+                anyhow::bail!(
+                    "the extension `{}` does not start with `x-`",
+                    key.escape_debug()
+                );
+            }
+            validate_document_text("extension name", key, false)?;
+        }
         Ok(())
     }
 }
 
 /// Characters that reorder what a reader sees rather than adding to it.
 const BIDI_OVERRIDES: &[char] = &[
-    '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
-    '\u{2067}', '\u{2068}', '\u{2069}',
+    // U+061C is the one that hides: it is a formatting character, so
+    // `char::is_control()` says nothing about it, and it reorders text all the
+    // same.
+    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
 ];
 
 /// Refuse operator text that must not reach a served document or a log line.
@@ -261,6 +318,18 @@ fn document_tags(
         }
         let mut built = utoipa::openapi::Tag::new(&tag.name);
         built.description.clone_from(&tag.description);
+        if let Some(docs) = &tag.external_docs {
+            let mut emitted = utoipa::openapi::external_docs::ExternalDocs::new(&docs.url);
+            emitted.description.clone_from(&docs.description);
+            built.external_docs = Some(emitted);
+        }
+        if !tag.extensions.is_empty() {
+            let mut emitted = utoipa::openapi::extensions::Extensions::default();
+            for (key, value) in &tag.extensions {
+                emitted.insert(key.clone(), value.clone());
+            }
+            built.extensions = Some(emitted);
+        }
         tags.push(built);
     }
 
@@ -1444,6 +1513,72 @@ mod tests {
         assert!(tag.with_description("Bell\u{7}here").is_err());
     }
 
+    /// U+061C reorders text and is not a control character, so it needs naming.
+    #[test]
+    fn the_arabic_letter_mark_is_rejected_like_the_other_overrides() {
+        assert!(
+            !'\u{061C}'.is_control(),
+            "if this ever becomes a control character the explicit entry is redundant"
+        );
+        assert!(OpenApiTag::new("Orders\u{061C}").is_err());
+        assert!(
+            OpenApiTag::new("Orders")
+                .unwrap()
+                .with_description("Fine\u{061C}print")
+                .is_err()
+        );
+    }
+
+    /// A group can carry `externalDocs` and `x-*`, and they reach the document.
+    #[test]
+    fn external_docs_and_extensions_reach_the_document() {
+        let registry = OpenApiRegistryImpl::new();
+        registry.register_operation(&tagged_operation("/orders", "Orders"));
+
+        let mut declared = OpenApiTag::new("Orders").unwrap();
+        declared.external_docs = Some(OpenApiExternalDocs {
+            url: "https://example.test/orders".to_owned(),
+            description: Some("The long version.".to_owned()),
+        });
+        declared
+            .extensions
+            .insert("x-displayName".to_owned(), serde_json::json!("Orders"));
+
+        let info = OpenApiInfo {
+            tags: vec![declared],
+            ..OpenApiInfo::default()
+        };
+        let json = serde_json::to_value(registry.build_openapi(&info).unwrap()).unwrap();
+        let tag = &json.get("tags").unwrap()[0];
+
+        assert_eq!(
+            tag.get("externalDocs").unwrap().get("url").unwrap(),
+            "https://example.test/orders"
+        );
+        assert_eq!(
+            tag.get("externalDocs").unwrap().get("description").unwrap(),
+            "The long version."
+        );
+        assert_eq!(
+            tag.get("x-displayName").unwrap(),
+            "Orders",
+            "an extension is emitted as a member of the tag: {tag}"
+        );
+    }
+
+    /// A member that is not an extension is refused rather than invented.
+    #[test]
+    fn an_extension_without_the_x_prefix_is_rejected() {
+        let mut tag = OpenApiTag::new("Orders").unwrap();
+        tag.extensions
+            .insert("displayName".to_owned(), serde_json::json!("Orders"));
+
+        assert!(
+            validate_tags(&[tag]).is_err(),
+            "every non-`x-` member of an OpenAPI object belongs to the specification"
+        );
+    }
+
     /// The error points at the entry, since a bad name has nothing to call it by.
     #[test]
     fn a_rejected_group_is_identified_by_position() {
@@ -1451,7 +1586,7 @@ mod tests {
             OpenApiTag::new("Fine").unwrap(),
             OpenApiTag {
                 name: String::new(),
-                description: None,
+                ..OpenApiTag::default()
             },
         ];
 
@@ -1472,7 +1607,7 @@ mod tests {
         assert!(
             validate_tags(&[OpenApiTag {
                 name: String::new(),
-                description: None,
+                ..OpenApiTag::default()
             }])
             .is_err(),
             "a list that arrived from config is checked too, not just the constructor"
