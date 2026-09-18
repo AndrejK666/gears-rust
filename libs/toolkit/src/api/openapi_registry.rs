@@ -205,6 +205,12 @@ pub struct OpenApiInfo {
     pub version: String,
     pub description: Option<String>,
     pub servers: Vec<String>,
+    /// Document-level tag groups, in the order a reader should meet them.
+    ///
+    /// Empty — as [`Default`] leaves it — means the document carries no `tags`
+    /// key at all, which is the document every caller had before this field
+    /// existed.
+    pub tags: Vec<OpenApiTag>,
 }
 
 impl Default for OpenApiInfo {
@@ -214,6 +220,7 @@ impl Default for OpenApiInfo {
             version: "0.1.0".to_owned(),
             description: None,
             servers: Vec::new(),
+            tags: Vec::new(),
         }
     }
 }
@@ -424,39 +431,24 @@ impl OpenApiRegistryImpl {
 
     /// Build `OpenAPI` specification from registered operations and components.
     ///
-    /// The document carries no `tags` list; see [`Self::build_openapi_with_tags`]
-    /// to declare the order and the descriptions of its groups.
-    ///
-    /// # Arguments
-    /// * `info` - `OpenAPI` document metadata (title, version, description)
-    ///
-    /// # Errors
-    /// Returns an error if the `OpenAPI` specification cannot be built.
-    pub fn build_openapi(&self, info: &OpenApiInfo) -> Result<OpenApi> {
-        self.build_openapi_with_tags(info, &[])
-    }
-
-    /// Build the specification, declaring the document-level tag groups.
-    ///
-    /// An operation declares the tag it belongs to; `tags` here declares the
-    /// groups those tags name — the order a reader meets them in, and what each
-    /// is for. Documentation browsers read this list to order and describe the
-    /// groups, and fall back to the order the tags first appear in when it is
-    /// absent.
+    /// An operation declares the tag it belongs to; [`OpenApiInfo::tags`]
+    /// declares the groups those tags name — the order a reader meets them in,
+    /// and what each is for. Documentation browsers read that list to order and
+    /// describe the groups, and fall back to the order the tags first appear in
+    /// when it is absent.
     ///
     /// The list is a preference, not a whitelist: a tag an operation uses but
-    /// this list omits is still emitted, after the declared ones, so its
-    /// placement stays ours rather than the browser's. Pass an empty slice — as
-    /// [`Self::build_openapi`] does — and the document carries no `tags` key at
+    /// the list omits is still emitted, after the declared ones, so its
+    /// placement stays ours rather than the browser's. Leave it empty — as
+    /// [`OpenApiInfo::default`] does — and the document carries no `tags` key at
     /// all.
     ///
     /// # Arguments
-    /// * `info` - `OpenAPI` document metadata (title, version, description)
-    /// * `tags` - document-level groups, in presentation order
+    /// * `info` - `OpenAPI` document metadata (title, version, description, tag groups)
     ///
     /// # Errors
-    /// Returns an error if `tags` does not pass [`validate_tags`], or if the
-    /// `OpenAPI` specification cannot be built.
+    /// Returns an error if the tag groups do not pass [`validate_tags`], or if
+    /// the `OpenAPI` specification cannot be built.
     // This is the registry that turns registered `OperationSpec`s into utoipa
     // operations, so it necessarily constructs them here rather than through
     // `OperationBuilder` — which is the very thing that feeds it. The lint is
@@ -467,13 +459,10 @@ impl OpenApiRegistryImpl {
         de0205_operation_builder,
         reason = "this function implements the registry OperationBuilder registers into"
     )]
-    pub fn build_openapi_with_tags(
-        &self,
-        info: &OpenApiInfo,
-        tags: &[OpenApiTag],
-    ) -> Result<OpenApi> {
+    pub fn build_openapi(&self, info: &OpenApiInfo) -> Result<OpenApi> {
         use http::Method;
 
+        let tags = info.tags.as_slice();
         validate_tags(tags)?;
 
         // Only walked when it will be read: `document_tags` returns early on an
@@ -990,6 +979,7 @@ mod tests {
             version: "1".to_owned(),
             description: None,
             servers: Vec::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -1181,6 +1171,7 @@ mod tests {
             version: "1.0.0".to_owned(),
             description: Some("Test API Description".to_owned()),
             servers: Vec::new(),
+            tags: Vec::new(),
         };
         let doc = registry.build_openapi(&info).unwrap();
         let json = serde_json::to_value(&doc).unwrap();
@@ -1272,9 +1263,11 @@ mod tests {
             OpenApiTag::new("Alpha").unwrap(),
         ];
 
-        let doc = registry
-            .build_openapi_with_tags(&OpenApiInfo::default(), &groups)
-            .unwrap();
+        let info = OpenApiInfo {
+            tags: groups.to_vec(),
+            ..OpenApiInfo::default()
+        };
+        let doc = registry.build_openapi(&info).unwrap();
         let json = serde_json::to_value(&doc).unwrap();
         let tags = json
             .get("tags")
@@ -1326,7 +1319,11 @@ mod tests {
             OpenApiTag::new("Orders").unwrap(),
         ];
 
-        let Err(error) = registry.build_openapi_with_tags(&OpenApiInfo::default(), &groups) else {
+        let info = OpenApiInfo {
+            tags: groups.to_vec(),
+            ..OpenApiInfo::default()
+        };
+        let Err(error) = registry.build_openapi(&info) else {
             panic!("a duplicate group name must not reach a document");
         };
 
@@ -1348,12 +1345,11 @@ mod tests {
         let registry = OpenApiRegistryImpl::new();
         registry.register_operation(&tagged_operation("/orders", "orders"));
 
-        let doc = registry
-            .build_openapi_with_tags(
-                &OpenApiInfo::default(),
-                &[OpenApiTag::new("Orders").unwrap()],
-            )
-            .unwrap();
+        let info = OpenApiInfo {
+            tags: vec![OpenApiTag::new("Orders").unwrap()],
+            ..OpenApiInfo::default()
+        };
+        let doc = registry.build_openapi(&info).unwrap();
         let json = serde_json::to_value(&doc).unwrap();
 
         let names: Vec<&str> = json
