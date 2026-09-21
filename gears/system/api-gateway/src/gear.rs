@@ -701,13 +701,15 @@ impl ApiGateway {
     pub fn build_openapi(&self) -> Result<utoipa::openapi::OpenApi> {
         let config = self.get_cached_config();
         let prefix = Self::normalize_prefix_path(&config.prefix_path)?;
-        let info = toolkit::api::OpenApiInfo {
-            title: config.openapi.title.clone(),
-            version: config.openapi.version.clone(),
-            description: config.openapi.description.clone(),
-            servers: (!prefix.is_empty()).then_some(prefix).into_iter().collect(),
-            tags: config.openapi.tags.clone(),
-        };
+        let mut info = toolkit::api::OpenApiInfo::new(
+            config.openapi.title.clone(),
+            config.openapi.version.clone(),
+        )
+        .with_servers((!prefix.is_empty()).then_some(prefix).into_iter().collect())
+        .with_tags(config.openapi.tags.clone());
+        if let Some(description) = config.openapi.description.clone() {
+            info = info.with_description(description);
+        }
         let mut openapi = self.openapi_registry.build_openapi(&info)?;
         enrich_openapi_with_zone_limits(&mut openapi, &config);
         Ok(openapi)
@@ -1215,9 +1217,13 @@ impl toolkit::Gear for ApiGateway {
         cfg.gateway_proxy
             .validate()
             .map_err(|e| anyhow::anyhow!(e))?;
-        // Same reason for the documentation groups: a blank or duplicated tag name
-        // makes an invalid OpenAPI document, and the only place anyone would notice
-        // is a docs browser that quietly renders it wrong.
+        // Same reason for the whole `openapi` block: a blank or duplicated tag
+        // name, or a blank, over-long or control-character-bearing `title`,
+        // `version` or `description`, makes an invalid OpenAPI document, and the
+        // only place anyone would notice is a docs browser that quietly renders
+        // it wrong. Note that this is a new way for `init` to fail: an assembly
+        // that boots today with `openapi.title: ""` stops booting here, which
+        // the README says in as many words.
         cfg.openapi.validate()?;
         self.config.store(Arc::new(cfg.clone()));
 

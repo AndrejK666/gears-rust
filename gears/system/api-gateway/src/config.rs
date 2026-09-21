@@ -373,22 +373,20 @@ pub struct OpenApiConfig {
     pub tags: Vec<toolkit::api::OpenApiTag>,
 }
 
-/// Longest an `OpenAPI` document title or version may be.
-const MAX_OPENAPI_TITLE_LEN: usize = 200;
-/// Longest an `OpenAPI` document description may be.
-const MAX_OPENAPI_DESCRIPTION_LEN: usize = 4_000;
-
 impl OpenApiConfig {
     /// Reject document metadata that cannot make a valid served document.
     ///
-    /// Called from `Gear::init`, beside the other config checks, so a blank or
-    /// duplicated group name is a startup error naming the offending entry
-    /// rather than an invalid `openapi.json` served to every reader.
+    /// Called from `Gear::init`, beside the other config checks, so a blank
+    /// title or a duplicated group name is a startup error naming the offending
+    /// field rather than an invalid `openapi.json` served to every reader.
     ///
     /// Every field here is operator text that reaches `/openapi.json` on an
     /// anonymous route and the `/docs` page in a browser, so all four are
     /// checked, not only `tags`: `title` and `version` land in the document's
-    /// `info` block and are read by every generated client.
+    /// `info` block and are read by every generated client. The checks
+    /// themselves live in the toolkit, beside the registry that builds the
+    /// document, so a caller that reaches that registry without this config
+    /// gets the same guarantee rather than half of it.
     ///
     /// # Errors
     /// Returns an error on a blank, over-long or control-character-bearing
@@ -396,42 +394,13 @@ impl OpenApiConfig {
     /// [`toolkit::api::validate_tags`] rejects.
     pub fn validate(&self) -> anyhow::Result<()> {
         use anyhow::Context as _;
-        use toolkit::api::validate_document_text;
 
-        if self.title.trim().is_empty() {
-            anyhow::bail!("invalid openapi configuration: `title` is blank");
-        }
-        if self.version.trim().is_empty() {
-            anyhow::bail!("invalid openapi configuration: `version` is blank");
-        }
-        if self.title.chars().count() > MAX_OPENAPI_TITLE_LEN {
-            anyhow::bail!(
-                "invalid openapi configuration: `title` is longer than \
-                 {MAX_OPENAPI_TITLE_LEN} characters"
-            );
-        }
-        if self.version.chars().count() > MAX_OPENAPI_TITLE_LEN {
-            anyhow::bail!(
-                "invalid openapi configuration: `version` is longer than \
-                 {MAX_OPENAPI_TITLE_LEN} characters"
-            );
-        }
-        validate_document_text("title", &self.title, false)
-            .context("invalid openapi configuration")?;
-        validate_document_text("version", &self.version, false)
-            .context("invalid openapi configuration")?;
-
-        if let Some(description) = &self.description {
-            if description.chars().count() > MAX_OPENAPI_DESCRIPTION_LEN {
-                anyhow::bail!(
-                    "invalid openapi configuration: `description` is longer than \
-                     {MAX_OPENAPI_DESCRIPTION_LEN} characters"
-                );
-            }
-            validate_document_text("description", description, true)
-                .context("invalid openapi configuration")?;
-        }
-
+        toolkit::api::validate_document_metadata(
+            &self.title,
+            &self.version,
+            self.description.as_deref(),
+        )
+        .context("invalid openapi configuration")?;
         toolkit::api::validate_tags(&self.tags).context("invalid openapi configuration")
     }
 }
@@ -799,6 +768,110 @@ mod tests {
             "title": "Example Assembly",
             "version": "0.1.0",
             "tags": [{ "name": "  " }],
+        }))
+        .expect("it parses; it is validation that rejects it");
+
+        assert!(cfg.validate().is_err());
+    }
+
+    /// The `info` block is operator text too, and every case here is a new way
+    /// for `Gear::init` to fail — an assembly that booted with a blank title
+    /// stops booting.
+    #[test]
+    fn blank_openapi_title_or_version_fails_validation() {
+        let blank_title = OpenApiConfig {
+            title: "   ".to_owned(),
+            ..OpenApiConfig::default()
+        };
+        assert!(
+            blank_title.validate().is_err(),
+            "a document no generated client can name is not a document"
+        );
+
+        let blank_version = OpenApiConfig {
+            version: String::new(),
+            ..OpenApiConfig::default()
+        };
+        assert!(blank_version.validate().is_err());
+
+        let folded_title = OpenApiConfig {
+            title: "Example\nAssembly".to_owned(),
+            ..OpenApiConfig::default()
+        };
+        assert!(
+            folded_title.validate().is_err(),
+            "a folded YAML `title:` carries a newline that forges a startup log line"
+        );
+
+        let reordered_description = OpenApiConfig {
+            description: Some("The \u{202E}assembly.".to_owned()),
+            ..OpenApiConfig::default()
+        };
+        assert!(reordered_description.validate().is_err());
+    }
+
+    /// Both caps, at the boundary and one past it.
+    #[test]
+    fn openapi_title_version_and_description_are_bounded() {
+        // Kept as literals rather than imported: the point of the test is that
+        // the numbers the toolkit enforces are the ones documented here, so a
+        // change to either has to be made twice, deliberately.
+        const TITLE_CAP: usize = 200;
+        const DESCRIPTION_CAP: usize = 4_000;
+
+        let at_cap = OpenApiConfig {
+            title: "t".repeat(TITLE_CAP),
+            version: "v".repeat(TITLE_CAP),
+            description: Some("d".repeat(DESCRIPTION_CAP)),
+            ..OpenApiConfig::default()
+        };
+        assert!(at_cap.validate().is_ok(), "at the cap is within it");
+
+        for over in [
+            OpenApiConfig {
+                title: "t".repeat(TITLE_CAP + 1),
+                ..OpenApiConfig::default()
+            },
+            OpenApiConfig {
+                version: "v".repeat(TITLE_CAP + 1),
+                ..OpenApiConfig::default()
+            },
+            OpenApiConfig {
+                description: Some("d".repeat(DESCRIPTION_CAP + 1)),
+                ..OpenApiConfig::default()
+            },
+        ] {
+            assert!(over.validate().is_err(), "one past the cap is past it");
+        }
+    }
+
+    /// The deny is the entire reason `extensions` is a nested map.
+    #[test]
+    fn a_mistyped_key_in_a_tag_entry_is_refused() {
+        let result: Result<OpenApiConfig, _> = serde_json::from_value(serde_json::json!({
+            "title": "Example Assembly",
+            "version": "0.1.0",
+            "tags": [{ "name": "Orders", "descrption": "Placing an order." }],
+        }));
+
+        assert!(
+            result.is_err(),
+            "a mistyped key must be a startup error, not a group that quietly \
+             lost its description"
+        );
+    }
+
+    /// An `x-*` member an operator wrote reaches the served document, so the
+    /// config layer refuses the ones that cannot be served.
+    #[test]
+    fn an_unusable_tag_extension_fails_validation() {
+        let cfg: OpenApiConfig = serde_json::from_value(serde_json::json!({
+            "title": "Example Assembly",
+            "version": "0.1.0",
+            "tags": [{
+                "name": "Orders",
+                "extensions": { "x-displayName": "Ord\u{202E}ers" },
+            }],
         }))
         .expect("it parses; it is validation that rejects it");
 
