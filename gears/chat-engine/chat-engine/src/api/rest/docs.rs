@@ -100,17 +100,18 @@ impl GearOpenApiDoc {
     /// Call once, after the last `OperationBuilder::register` — operations
     /// registered later are missing from the document. A second call is a no-op.
     pub fn build(&self, registry: &TeeRegistry<'_>) {
-        let info = OpenApiInfo::new("Chat Engine API", env!("CARGO_PKG_VERSION")).with_description(
-            "REST surface of the Chat Engine gear: session types, session lifecycle, \
-                 messages and SSE streaming, variants, reactions, search, session \
-                 intelligence, export and sharing.",
-        );
+        let built = OpenApiInfo::new("Chat Engine API", env!("CARGO_PKG_VERSION"))
+            .and_then(|info| {
+                info.with_description(
+                    "REST surface of the Chat Engine gear: session types, session lifecycle, \
+                     messages and SSE streaming, variants, reactions, search, session \
+                     intelligence, export and sharing.",
+                )
+            })
+            .and_then(|info| registry.gear_registry().build_openapi(&info))
+            .and_then(|doc| serde_json::to_value(doc).map_err(Into::into));
 
-        match registry
-            .gear_registry()
-            .build_openapi(&info)
-            .and_then(|doc| serde_json::to_value(doc).map_err(Into::into))
-        {
+        match built {
             Ok(document) => {
                 if self.document.set(document).is_err() {
                     tracing::debug!("chat-engine: gear OpenAPI document already built");

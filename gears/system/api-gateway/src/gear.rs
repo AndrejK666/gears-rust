@@ -704,11 +704,11 @@ impl ApiGateway {
         let mut info = toolkit::api::OpenApiInfo::new(
             config.openapi.title.clone(),
             config.openapi.version.clone(),
-        )
-        .with_servers((!prefix.is_empty()).then_some(prefix).into_iter().collect())
-        .with_tags(config.openapi.tags.clone());
+        )?
+        .with_servers((!prefix.is_empty()).then_some(prefix).into_iter().collect())?
+        .with_tags(config.openapi.tags.clone())?;
         if let Some(description) = config.openapi.description.clone() {
-            info = info.with_description(description);
+            info = info.with_description(description)?;
         }
         let mut openapi = self.openapi_registry.build_openapi(&info)?;
         enrich_openapi_with_zone_limits(&mut openapi, &config);

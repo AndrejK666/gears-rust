@@ -1441,7 +1441,8 @@ impl HostRuntime {
                 .version
                 .clone()
                 .unwrap_or_else(|| "0.0.0".to_owned()),
-        );
+        )
+        .context("OoP router: OpenAPI document metadata")?;
         let openapi = registry
             .build_openapi(&info)
             .context("OoP router: build OpenAPI document")?;

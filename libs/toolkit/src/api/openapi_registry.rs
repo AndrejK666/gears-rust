@@ -79,7 +79,17 @@ pub struct OpenApiTag {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Where a reader goes for more than a description can hold.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Aliased to `externalDocs` because that is how the `OpenAPI`
+    /// specification spells it, and an operator filling this in is usually
+    /// copying from a document that already exists. Without the alias
+    /// `deny_unknown_fields` turns that paste into a startup error naming a
+    /// field the specification says is correct.
+    #[serde(
+        default,
+        alias = "externalDocs",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub external_docs: Option<OpenApiExternalDocs>,
     /// `x-*` members to emit on the group, for whatever reads the document.
     ///
@@ -375,8 +385,8 @@ const ALWAYS_REFUSED: &[char] = &[
     '\u{2028}', '\u{2029}',
 ];
 
-/// Characters that render as nothing, refused only where the bytes are an
-/// identity.
+/// Unicode general category `Cf`, as ranges: characters that render as
+/// nothing, refused only where the bytes are an identity.
 ///
 /// In a [`TextKind::Exact`] field these are forgeries: `Orders` followed by
 /// U+200B renders as `Orders`, matches no operation, and is the invisible ghost
@@ -387,10 +397,44 @@ const ALWAYS_REFUSED: &[char] = &[
 /// emoji, so refusing them in a description or a title would not be a security
 /// win — it would be a promise that this gateway's documentation may only be
 /// written in some languages.
-const INVISIBLE_IN_EXACT_FIELDS: &[char] = &[
-    '\u{00AD}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{2061}', '\u{2062}',
-    '\u{2063}', '\u{2064}', '\u{FEFF}',
+///
+/// A category rather than a hand-picked list, because a hand-picked list was
+/// the wrong shape twice: `Cf` has some 160 members scattered across a dozen
+/// blocks, and naming the ones somebody thought of leaves every other one
+/// accepted. U+E0020..=U+E007F alone is 96 tag characters, each of which
+/// renders as nothing, so `OpenApiTag::new("Orders\u{E0041}")` read as
+/// `Orders` and matched no operation. Transcribed from `UnicodeData.txt`.
+const FORMAT_CHARACTER_RANGES: &[(char, char)] = &[
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{06DD}', '\u{06DD}'),
+    ('\u{070F}', '\u{070F}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08E2}', '\u{08E2}'),
+    ('\u{180E}', '\u{180E}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFF9}', '\u{FFFB}'),
+    ('\u{110BD}', '\u{110BD}'),
+    ('\u{110CD}', '\u{110CD}'),
+    ('\u{13430}', '\u{1343F}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0001}', '\u{E0001}'),
+    ('\u{E0020}', '\u{E007F}'),
 ];
+
+/// Whether `c` is a formatting character, and so a forgery in a field whose
+/// characters are its identity.
+fn is_format_character(c: char) -> bool {
+    FORMAT_CHARACTER_RANGES
+        .iter()
+        .any(|&(first, last)| (first..=last).contains(&c))
+}
 
 /// Refuse operator text that must not reach a served document or a log line.
 ///
@@ -411,7 +455,7 @@ const INVISIBLE_IN_EXACT_FIELDS: &[char] = &[
 pub fn validate_document_text(label: &'static str, value: &str, kind: TextKind) -> Result<()> {
     let offending = value.chars().find(|c| {
         let break_ok = kind == TextKind::Prose && matches!(c, '\n' | '\r' | '\t');
-        let invisible = kind == TextKind::Exact && INVISIBLE_IN_EXACT_FIELDS.contains(c);
+        let invisible = kind == TextKind::Exact && is_format_character(*c);
         (c.is_control() && !break_ok) || ALWAYS_REFUSED.contains(c) || invisible
     });
 
@@ -543,34 +587,54 @@ impl Default for OpenApiInfo {
 
 impl OpenApiInfo {
     /// A document with this title and version, declaring nothing else.
-    #[must_use]
-    pub fn new(title: impl Into<String>, version: impl Into<String>) -> Self {
-        Self {
+    ///
+    /// Checked here as well as in [`OpenApiInfo::validate`], so that a caller
+    /// cannot hold an invalid value until something else happens to look —
+    /// which is what [`OpenApiTag::new`] and [`OpenApiExternalDocs::new`] do,
+    /// and there is no reason for this type to be the odd one out.
+    ///
+    /// # Errors
+    /// Returns an error if the title or version is blank, over-long or carries
+    /// a refused character.
+    pub fn new(title: impl Into<String>, version: impl Into<String>) -> Result<Self> {
+        let info = Self {
             title: title.into(),
             version: version.into(),
             ..Self::default()
-        }
+        };
+        info.validate()?;
+        Ok(info)
     }
 
     /// The same document, described.
-    #[must_use]
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if the description is over-long or carries a refused
+    /// character.
+    pub fn with_description(mut self, description: impl Into<String>) -> Result<Self> {
         self.description = Some(description.into());
-        self
+        self.validate()?;
+        Ok(self)
     }
 
     /// The same document, served from these urls.
-    #[must_use]
-    pub fn with_servers(mut self, servers: Vec<String>) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if the document this is added to is not itself valid.
+    pub fn with_servers(mut self, servers: Vec<String>) -> Result<Self> {
         self.servers = servers;
-        self
+        self.validate()?;
+        Ok(self)
     }
 
     /// The same document, declaring the order its groups are read in.
-    #[must_use]
-    pub fn with_tags(mut self, tags: Vec<OpenApiTag>) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if the groups do not pass [`validate_tags`].
+    pub fn with_tags(mut self, tags: Vec<OpenApiTag>) -> Result<Self> {
         self.tags = tags;
-        self
+        self.validate()?;
+        Ok(self)
     }
 
     /// Everything an operator wrote into this document, checked before it is
@@ -1996,6 +2060,48 @@ mod tests {
         }
     }
 
+    /// The whole category, not the members somebody happened to think of.
+    ///
+    /// Every character here is `Cf`, renders as nothing, and was accepted
+    /// before the check became a range table. U+E0041 is the one that shows
+    /// why it matters: `Orders` followed by it reads as `Orders` in a sidebar
+    /// and matches no operation, which is the ghost group again under a
+    /// different code point.
+    #[test]
+    fn a_format_character_is_refused_in_a_name_whether_or_not_it_is_a_familiar_one() {
+        for c in [
+            '\u{E0001}',
+            '\u{E0041}',
+            '\u{E007F}',
+            '\u{206A}',
+            '\u{206F}',
+            '\u{FFF9}',
+            '\u{FFFB}',
+            '\u{0600}',
+            '\u{110BD}',
+            '\u{1D173}',
+        ] {
+            assert!(
+                !c.is_control(),
+                "U+{:04X} is a control character, so the range is redundant",
+                c as u32
+            );
+            assert!(
+                OpenApiTag::new(format!("Orders{c}")).is_err(),
+                "U+{:04X} in a name is accepted",
+                c as u32
+            );
+            assert!(
+                OpenApiTag::new("Orders")
+                    .unwrap()
+                    .with_description(format!("Fine{c}print"))
+                    .is_ok(),
+                "U+{:04X} in prose is refused, and prose is not an identity",
+                c as u32
+            );
+        }
+    }
+
     /// Reordering a reader's text, or ending a line for whatever consumes the
     /// document, is a lie about it in any field — prose included.
     #[test]
@@ -2292,10 +2398,12 @@ mod tests {
         let registry = OpenApiRegistryImpl::new();
         registry.register_operation(&tagged_operation("/orders", "Orders"));
 
-        let info = OpenApiInfo::default().with_tags(vec![
-            OpenApiTag::new("Orders").unwrap(),
-            OpenApiTag::new("orders").unwrap(),
-        ]);
+        let info = OpenApiInfo::default()
+            .with_tags(vec![
+                OpenApiTag::new("Orders").unwrap(),
+                OpenApiTag::new("orders").unwrap(),
+            ])
+            .unwrap();
         registry.build_openapi(&info).unwrap();
 
         assert!(
@@ -2341,52 +2449,45 @@ mod tests {
     /// where the document is built and not only where the gateway loads config.
     #[test]
     fn document_metadata_is_checked_by_the_registry() {
-        let registry = OpenApiRegistryImpl::new();
-
         assert!(
-            registry
-                .build_openapi(&OpenApiInfo::new("", "0.1.0"))
-                .is_err(),
+            OpenApiInfo::new("", "0.1.0").is_err(),
             "a blank title makes a document no client can name"
         );
+        assert!(OpenApiInfo::new("Example", "  ").is_err());
         assert!(
-            registry
-                .build_openapi(&OpenApiInfo::new("Example", "  "))
-                .is_err()
-        );
-        assert!(
-            registry
-                .build_openapi(&OpenApiInfo::new("Exa\nmple", "0.1.0"))
-                .is_err(),
+            OpenApiInfo::new("Exa\nmple", "0.1.0").is_err(),
             "a folded YAML title carries a newline into the info block"
         );
+        assert!(OpenApiInfo::new("E".repeat(MAX_DOCUMENT_TITLE_LEN + 1), "0.1.0").is_err());
         assert!(
-            registry
-                .build_openapi(&OpenApiInfo::new(
-                    "E".repeat(MAX_DOCUMENT_TITLE_LEN + 1),
-                    "0.1.0"
-                ))
+            OpenApiInfo::new("Example", "0.1.0")
+                .unwrap()
+                .with_description("d".repeat(MAX_DOCUMENT_DESCRIPTION_LEN + 1))
                 .is_err()
         );
         assert!(
-            registry
-                .build_openapi(
-                    &OpenApiInfo::new("Example", "0.1.0")
-                        .with_description("d".repeat(MAX_DOCUMENT_DESCRIPTION_LEN + 1))
-                )
-                .is_err()
-        );
-        assert!(
-            registry
-                .build_openapi(
-                    &OpenApiInfo::new(
-                        "E".repeat(MAX_DOCUMENT_TITLE_LEN),
-                        "v".repeat(MAX_DOCUMENT_TITLE_LEN)
-                    )
-                    .with_description("d".repeat(MAX_DOCUMENT_DESCRIPTION_LEN))
-                )
-                .is_ok(),
+            OpenApiInfo::new(
+                "E".repeat(MAX_DOCUMENT_TITLE_LEN),
+                "v".repeat(MAX_DOCUMENT_TITLE_LEN)
+            )
+            .unwrap()
+            .with_description("d".repeat(MAX_DOCUMENT_DESCRIPTION_LEN))
+            .is_ok(),
             "at the cap is within it"
+        );
+
+        // The constructor is the door, not the only lock: the fields are public
+        // because config deserialises straight into them, so the registry
+        // checks again on the way out.
+        let unchecked = OpenApiInfo {
+            title: "  ".to_owned(),
+            ..OpenApiInfo::default()
+        };
+        assert!(
+            OpenApiRegistryImpl::new()
+                .build_openapi(&unchecked)
+                .is_err(),
+            "an info that reached the registry some other way is checked there"
         );
     }
 

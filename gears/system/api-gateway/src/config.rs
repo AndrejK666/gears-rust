@@ -845,6 +845,45 @@ mod tests {
         }
     }
 
+    /// The specification spells it `externalDocs`, and an operator filling
+    /// this in is usually copying from a document that already has one.
+    #[test]
+    fn a_tag_takes_the_specifications_spelling_of_external_docs() {
+        let camel: OpenApiConfig = serde_json::from_value(serde_json::json!({
+            "title": "Example Assembly",
+            "version": "0.1.0",
+            "tags": [{
+                "name": "Orders",
+                "externalDocs": { "url": "https://example.test/orders" },
+            }],
+        }))
+        .expect("`externalDocs` is how the OpenAPI specification spells it");
+
+        assert_eq!(
+            camel.tags[0]
+                .external_docs
+                .as_ref()
+                .expect("the alias reaches the field")
+                .url,
+            "https://example.test/orders"
+        );
+        assert!(camel.validate().is_ok());
+
+        let snake: OpenApiConfig = serde_json::from_value(serde_json::json!({
+            "title": "Example Assembly",
+            "version": "0.1.0",
+            "tags": [{
+                "name": "Orders",
+                "external_docs": { "url": "https://example.test/orders" },
+            }],
+        }))
+        .expect("the spelling the README shows keeps working");
+        assert!(
+            snake.tags[0].external_docs.is_some(),
+            "an alias adds a spelling, it does not replace one"
+        );
+    }
+
     /// The deny is the entire reason `extensions` is a nested map.
     #[test]
     fn a_mistyped_key_in_a_tag_entry_is_refused() {

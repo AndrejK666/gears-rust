@@ -56,7 +56,9 @@ instead of a group that quietly lost its description — and serde cannot combin
 that with a flattened catch-all. Extension names must start with `x-`, since
 every other member of an `OpenAPI` object belongs to the specification.
 
-`external_docs.url` must be an `http` or `https` url. A documentation browser
+`external_docs` is also accepted as `externalDocs`, which is how the `OpenAPI`
+specification spells it and therefore how it arrives when copied from a document
+that already exists. `external_docs.url` must be an `http` or `https` url. A documentation browser
 renders it as a link on the `/docs` page, which is served from the gateway's own
 origin, so a `javascript:` or `data:` url there would be a script one click
 away. Extension values are checked the same way every other string here is — no
