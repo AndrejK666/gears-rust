@@ -136,7 +136,7 @@ fn register_named_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .summary("Set a named setting")
         .description(
             "Create or replace one named setting. The value is any JSON value within \
-             the configured size bound; a new key past the per-user count bound is refused.",
+             the configured size bound; a new key past the per-user count bound is refused with 429.",
         )
         .tag("Settings")
         .path_param("key", KEY_DOC)
@@ -153,6 +153,7 @@ fn register_named_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .error_401(openapi)
         .error_403(openapi)
         .error_422(openapi)
+        .error_429(openapi)
         .error_500(openapi)
         .register(router, openapi);
 

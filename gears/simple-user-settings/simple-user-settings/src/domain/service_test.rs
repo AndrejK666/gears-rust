@@ -654,10 +654,7 @@ mod tests {
             .put_named_setting(&ctx, "c", one.clone())
             .await
             .expect_err("third new key");
-        assert!(
-            matches!(&err, DomainError::Validation { field, .. } if field == "key"),
-            "{err:?}"
-        );
+        assert!(matches!(&err, DomainError::LimitReached(_)), "{err:?}");
 
         service
             .put_named_setting(&ctx, "a", serde_json::json!(2))
@@ -902,6 +899,57 @@ mod tests {
         assert!(
             matches!(err, CanonicalError::InvalidArgument { .. }),
             "got {err:?}"
+        );
+    }
+
+    /// One unreadable row is skipped by the list, not fatal to it; a direct
+    /// read of that key still reports it.
+    #[tokio::test]
+    async fn a_corrupt_named_setting_does_not_take_the_list_down() {
+        use sea_orm::ConnectionTrait;
+        use sea_orm_migration::MigratorTrait;
+
+        // A named shared-cache database, so a second, raw handle reaches it:
+        // the service's own connection is sealed behind the secure layer.
+        let url = format!(
+            "sqlite:file:named-{}?mode=memory&cache=shared",
+            Uuid::new_v4().simple()
+        );
+        let raw = sea_orm::Database::connect(&url).await.expect("raw handle");
+        let db = connect_db(&url, ConnectOpts::default()).await.expect("db");
+        run_migrations_for_testing(&db, Migrator::migrations())
+            .await
+            .expect("migrations");
+        let service = build_service(db, ServiceConfig::default());
+        let ctx = create_test_context();
+
+        for key in ["a.fine", "b.broken", "c.fine"] {
+            service
+                .put_named_setting(&ctx, key, serde_json::json!(key))
+                .await
+                .expect("stored");
+        }
+        raw.execute_unprepared(
+            "UPDATE named_settings SET value = 'not json' WHERE key = 'b.broken'",
+        )
+        .await
+        .expect("corrupt one row");
+
+        let keys: Vec<String> = service
+            .list_named_settings(&ctx)
+            .await
+            .expect("the list survives")
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
+        assert_eq!(keys, ["a.fine", "c.fine"]);
+
+        assert!(
+            matches!(
+                service.get_named_setting(&ctx, "b.broken").await,
+                Err(DomainError::Internal(_))
+            ),
+            "the corrupt key itself still reports the corruption"
         );
     }
 }

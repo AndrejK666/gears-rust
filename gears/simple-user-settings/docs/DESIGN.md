@@ -150,8 +150,13 @@ reads need `get`, writes and deletes need `update`.
 - Unauthenticated request → 401 Unauthorized
 - Out of the caller's scope → 404 Not Found (masked, so existence is not disclosed)
 - Named setting not set → 404 Not Found
-- Malformed key, oversized value, or a new key past the count bound → 400 Bad Request
-  with a field violation on `key` or `value`
+- Malformed key or oversized value → 400 Bad Request with a field violation on
+  `key` or `value`
+- A new named key past `named_settings_per_user` → 429 Too Many Requests
+  (`resource_exhausted`, quota code `NAMED_SETTINGS_PER_USER`): the request is
+  valid once the caller deletes a key
+- JSON nested deeper than 128 levels → 400 Bad Request (refused while the body is
+  parsed)
 
 ## 8. Dependencies
 

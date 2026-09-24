@@ -128,4 +128,20 @@ mod tests {
         assert!(serde_json::from_str::<dto::PutNamedSettingRequest>("{}").is_err());
         assert!(serde_json::from_str::<dto::PutNamedSettingRequest>(r#"{"val":1}"#).is_err());
     }
+
+    /// The byte bound is not the only guard: `serde_json` refuses input nested
+    /// deeper than its recursion limit (128) while the body is parsed, so a
+    /// small but pathologically deep value never reaches the service.
+    #[test]
+    fn test_put_named_setting_request_refuses_pathological_nesting() {
+        let nested =
+            |depth: usize| format!(r#"{{"value":{}1{}}}"#, "[".repeat(depth), "]".repeat(depth));
+
+        serde_json::from_str::<dto::PutNamedSettingRequest>(&nested(100))
+            .expect("ordinary nesting is fine");
+        assert!(
+            serde_json::from_str::<dto::PutNamedSettingRequest>(&nested(1000)).is_err(),
+            "1000 levels must be refused at parse time"
+        );
+    }
 }

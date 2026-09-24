@@ -52298,7 +52298,7 @@
         ]
       },
       "put": {
-        "description": "Create or replace one named setting. The value is any JSON value within the configured size bound; a new key past the per-user count bound is refused.",
+        "description": "Create or replace one named setting. The value is any JSON value within the configured size bound; a new key past the per-user count bound is refused with 429.",
         "operationId": "simple_user_settings.put_named_setting",
         "parameters": [
           {
@@ -52372,6 +52372,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
           },
           "500": {
             "content": {

@@ -117,4 +117,18 @@ mod tests {
             .expect("a field violation");
         assert_eq!(violation.get("field").and_then(|v| v.as_str()), Some("key"));
     }
+
+    #[test]
+    fn test_limit_reached_is_429_with_a_quota_code() {
+        let problem = wire(DomainError::LimitReached(
+            "at most 256 named settings per user; delete one first".to_owned(),
+        ));
+
+        assert_eq!(problem.status, Some(429));
+        let body = serde_json::to_string(&problem.context).unwrap();
+        assert!(
+            body.contains("NAMED_SETTINGS_PER_USER"),
+            "quota code on the wire: {body}"
+        );
+    }
 }

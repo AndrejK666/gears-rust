@@ -180,17 +180,27 @@ impl SettingsRepository for SeaOrmSettingsRepository {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Vec<NamedSetting>, DomainError> {
-        NamedEntity::find()
+        let rows = NamedEntity::find()
             .secure()
             .scope_with(scope)
             .filter(owned_by(tenant_id, user_id))
             .order_by(named_entity::Column::Key, Order::Asc)
             .all(conn)
             .await
-            .map_err(map_scope_error)?
+            .map_err(map_scope_error)?;
+        // One unreadable row must not take the caller's other settings down
+        // with it: skip it here and say so in the log. A direct read of that
+        // key (`find_named`) still reports the corruption.
+        Ok(rows
             .into_iter()
-            .map(named_from_row)
-            .collect()
+            .filter_map(|row| match named_from_row(row) {
+                Ok(setting) => Some(setting),
+                Err(e) => {
+                    tracing::error!(error = %e, "skipping unreadable named setting in list");
+                    None
+                }
+            })
+            .collect())
     }
 
     async fn find_named<C: DBRunner>(

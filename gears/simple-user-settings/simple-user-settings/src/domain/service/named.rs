@@ -95,10 +95,9 @@ impl<R: SettingsRepository> Service<R> {
         let limit = self.config.named_settings_per_user;
         let over = |held: u64| usize::try_from(held).map_or(true, |held| held > limit);
         let too_many = || {
-            DomainError::validation(
-                SettingsFields::KEY,
-                format!("at most {limit} named settings per user; delete one first"),
-            )
+            DomainError::LimitReached(format!(
+                "at most {limit} named settings per user; delete one first"
+            ))
         };
 
         let is_new = self

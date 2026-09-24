@@ -81,8 +81,9 @@ pub trait NamedSettingsClientV1: Send + Sync {
 
     /// Create or replace one named setting.
     ///
-    /// Fails with `InvalidArgument` for a malformed key, a value over the size
-    /// bound, or a new key past the per-user count bound.
+    /// Fails with `InvalidArgument` for a malformed key or a value over the size
+    /// bound, and with `ResourceExhausted` (quota code `NAMED_SETTINGS_PER_USER`)
+    /// for a new key past the per-user count bound: free room by deleting one.
     async fn put_named_setting(
         &self,
         ctx: &SecurityContext,
