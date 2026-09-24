@@ -2043,36 +2043,70 @@ mod tests {
         );
     }
 
-    /// Every sibling field is bounded, so these are too.
+    /// Every sibling field is bounded, so these are too — and each cap is
+    /// driven from both sides, because a `>` that became a `>=` would
+    /// otherwise ship green.
     #[test]
     fn an_extension_is_bounded_in_size_depth_and_count() {
         let tag = OpenApiTag::new("Orders").unwrap();
+
+        // The bound is written in terms of the serialised length, and a JSON
+        // string serialises as its contents plus two quotes.
+        let at_cap = serde_json::json!("o".repeat(MAX_EXTENSION_VALUE_LEN - 2));
+        assert_eq!(
+            serde_json::to_string(&at_cap).unwrap().len(),
+            MAX_EXTENSION_VALUE_LEN,
+            "this is only a boundary test if the value is exactly at the cap"
+        );
+        assert!(
+            tag.clone().with_extension("x-blob", at_cap).is_ok(),
+            "a value exactly at the cap is within it"
+        );
         assert!(
             tag.clone()
                 .with_extension(
                     "x-blob",
-                    serde_json::json!("o".repeat(MAX_EXTENSION_VALUE_LEN))
+                    serde_json::json!("o".repeat(MAX_EXTENSION_VALUE_LEN - 1))
                 )
                 .is_err(),
-            "a pasted blob is re-serialised on every anonymous request"
+            "one byte past it is past it: a pasted blob is re-serialised on \
+             every anonymous request"
         );
 
-        let mut nested = serde_json::json!("deep");
-        for _ in 0..=MAX_EXTENSION_DEPTH {
-            nested = serde_json::Value::Array(vec![nested]);
-        }
+        let nested = |levels: usize| {
+            let mut value = serde_json::json!("deep");
+            for _ in 0..levels {
+                value = serde_json::Value::Array(vec![value]);
+            }
+            value
+        };
         assert!(
-            tag.with_extension("x-nest", nested).is_err(),
+            tag.clone()
+                .with_extension("x-nest", nested(MAX_EXTENSION_DEPTH))
+                .is_ok(),
+            "the deepest value the documentation allows is allowed"
+        );
+        assert!(
+            tag.with_extension("x-nest", nested(MAX_EXTENSION_DEPTH + 1))
+                .is_err(),
             "nothing else bounds how deep a value nests"
         );
 
-        let mut many = OpenApiTag::new("Orders").unwrap();
-        for i in 0..=MAX_TAG_EXTENSIONS {
-            many.extensions
-                .insert(format!("x-{i}"), serde_json::json!(i));
-        }
+        let carrying = |count: usize| {
+            let mut group = OpenApiTag::new("Orders").unwrap();
+            for i in 0..count {
+                group
+                    .extensions
+                    .insert(format!("x-{i}"), serde_json::json!(i));
+            }
+            group
+        };
         assert!(
-            validate_tags(&[many]).is_err(),
+            validate_tags(&[carrying(MAX_TAG_EXTENSIONS)]).is_ok(),
+            "a group carrying exactly the allowed number of members is a group"
+        );
+        assert!(
+            validate_tags(&[carrying(MAX_TAG_EXTENSIONS + 1)]).is_err(),
             "the number of members a group may carry is bounded like the number of groups"
         );
     }
