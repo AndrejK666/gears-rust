@@ -44,6 +44,15 @@ const MAX_TAG_EXTENSIONS: usize = 32;
 const MAX_EXTENSION_VALUE_LEN: usize = 4_096;
 /// Deepest an extension value may nest.
 const MAX_EXTENSION_DEPTH: usize = 8;
+/// Longest one `x-*` member name may be.
+const MAX_EXTENSION_KEY_LEN: usize = 100;
+/// Most bytes the whole declared list may serialise to.
+///
+/// The per-field caps multiply: 200 groups each carrying 32 extensions of 4096
+/// bytes is tens of megabytes, re-serialised on every anonymous request to
+/// `/openapi.json`. Each field can be within its own bound and the list still
+/// be something no reader wants, so the total is bounded too.
+const MAX_DECLARED_TAGS_BYTES: usize = 256 * 1024;
 
 /// One entry of the document-level `tags` list.
 ///
@@ -158,7 +167,7 @@ impl OpenApiTag {
                     "the description is longer than {MAX_TAG_DESCRIPTION_LEN} characters"
                 );
             }
-            validate_document_text("description", description, LineBreaks::Allowed)?;
+            validate_document_text("description", description, TextKind::Prose)?;
         }
 
         if let Some(docs) = &self.external_docs {
@@ -196,7 +205,7 @@ impl OpenApiTag {
                 self.name.escape_debug()
             );
         }
-        validate_document_text("name", &self.name, LineBreaks::Forbidden)
+        validate_document_text("name", &self.name, TextKind::Exact)
     }
 
     /// `x-*` members are operator text too, and the one field of a group whose
@@ -220,7 +229,14 @@ impl OpenApiTag {
                     key.escape_debug()
                 );
             }
-            validate_document_text("extension name", key, LineBreaks::Forbidden)?;
+            if key.chars().count() > MAX_EXTENSION_KEY_LEN {
+                anyhow::bail!(
+                    "the extension `{}` has a name longer than \
+                     {MAX_EXTENSION_KEY_LEN} characters",
+                    key.escape_debug()
+                );
+            }
+            validate_document_text("extension name", key, TextKind::Exact)?;
 
             let serialised = serde_json::to_string(value).with_context(|| {
                 format!(
@@ -300,16 +316,18 @@ impl OpenApiExternalDocs {
                 self.url.escape_debug()
             );
         }
-        validate_document_text(
-            "external documentation url",
-            &self.url,
-            LineBreaks::Forbidden,
-        )?;
+        validate_document_text("external documentation url", &self.url, TextKind::Exact)?;
         if let Some(description) = &self.description {
+            if description.chars().count() > MAX_TAG_DESCRIPTION_LEN {
+                anyhow::bail!(
+                    "the external documentation description is longer than \
+                     {MAX_TAG_DESCRIPTION_LEN} characters"
+                );
+            }
             validate_document_text(
                 "external documentation description",
                 description,
-                LineBreaks::Allowed,
+                TextKind::Prose,
             )?;
         }
         Ok(())
@@ -319,39 +337,59 @@ impl OpenApiExternalDocs {
 /// Schemes an `externalDocs` url may use.
 const DOC_URL_SCHEMES: &[&str] = &["https://", "http://"];
 
-/// Whether a field treats a newline as content or as smuggling.
+/// What a field is, which is what decides the characters it may carry.
 ///
-/// A bare `bool` at these call sites said nothing about which way round it
-/// went, and the argument it follows is operator text that must never be
-/// checked by accident.
+/// The first cut of this was a `LineBreaks` flag, and it conflated two
+/// questions that turn out to be independent: whether a newline is content,
+/// and whether a character that renders as nothing is content. A tag name is
+/// matched against an operation's tag by exact equality, so an invisible
+/// character in one is a forgery; a description is prose, and a writer of
+/// Persian or Hindi cannot spell their language without U+200C.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineBreaks {
-    /// Prose: an `OpenAPI` description is `CommonMark`, where a newline, a
-    /// carriage return and a tab are content.
-    Allowed,
-    /// A single-line field, where a newline forges a line in the startup log.
-    Forbidden,
+pub enum TextKind {
+    /// Matched by exact equality, or resolved as a link: the characters *are*
+    /// the identity, so one that renders as nothing is a forgery rather than a
+    /// flourish. A tag name, an `x-*` member name, a url.
+    Exact,
+    /// One line shown to a reader. A newline would forge a line in the startup
+    /// log; an emoji or a joiner is ordinary content. A title, a version.
+    Line,
+    /// `CommonMark` prose, where a newline, a carriage return and a tab are
+    /// content, and so is anything a writer needs to spell their language.
+    Prose,
 }
 
-/// Characters that hide, reorder or end a line rather than adding to it.
+/// Characters that reorder what a reader sees, or end a line for a consumer.
 ///
-/// `char::is_control()` is Unicode `Cc` and nothing else, so every formatting
-/// character here passes it. They divide into three kinds, each refused for its
-/// own reason: a bidirectional override reorders what a reader is shown without
-/// changing what is stored; a zero-width character renders as nothing, so
-/// `Orders` followed by U+200B is shown as `Orders`, matches no operation, and
-/// is the invisible ghost group the `trim()` check exists to prevent; and
-/// U+2028 and U+2029 are line terminators to a `JavaScript` documentation
-/// browser or a JSON log viewer, which is the forged line a control character
-/// is refused for.
-const HIDDEN_OR_REORDERING: &[char] = &[
+/// Refused in every field, whatever its kind. `char::is_control()` is Unicode
+/// `Cc` and nothing else, so none of these is caught by it. A bidirectional
+/// override reorders what a reader is shown without changing what is stored,
+/// which is a lie about the document in any field; U+2028 and U+2029 are line
+/// terminators to a `JavaScript` documentation browser or a JSON log viewer,
+/// which is the forged line a control character is refused for.
+const ALWAYS_REFUSED: &[char] = &[
     // Bidirectional marks, embeddings, overrides and isolates.
     '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
     '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
-    // Zero-width and otherwise invisible.
-    '\u{00AD}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{2061}', '\u{2062}',
-    '\u{2063}', '\u{2064}', '\u{FEFF}', // Line and paragraph separators.
+    // Line and paragraph separators.
     '\u{2028}', '\u{2029}',
+];
+
+/// Characters that render as nothing, refused only where the bytes are an
+/// identity.
+///
+/// In a [`TextKind::Exact`] field these are forgeries: `Orders` followed by
+/// U+200B renders as `Orders`, matches no operation, and is the invisible ghost
+/// group the `trim()` check exists to prevent in its visible form.
+///
+/// In prose they are not. U+200C is a required orthographic character in
+/// Persian, Hindi and Bengali, and U+200D is what joins the parts of a single
+/// emoji, so refusing them in a description or a title would not be a security
+/// win — it would be a promise that this gateway's documentation may only be
+/// written in some languages.
+const INVISIBLE_IN_EXACT_FIELDS: &[char] = &[
+    '\u{00AD}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{2061}', '\u{2062}',
+    '\u{2063}', '\u{2064}', '\u{FEFF}',
 ];
 
 /// Refuse operator text that must not reach a served document or a log line.
@@ -370,14 +408,11 @@ const HIDDEN_OR_REORDERING: &[char] = &[
 ///
 /// # Errors
 /// Returns an error naming the first offending character and its code point.
-pub fn validate_document_text(
-    label: &'static str,
-    value: &str,
-    line_breaks: LineBreaks,
-) -> Result<()> {
+pub fn validate_document_text(label: &'static str, value: &str, kind: TextKind) -> Result<()> {
     let offending = value.chars().find(|c| {
-        let break_ok = line_breaks == LineBreaks::Allowed && matches!(c, '\n' | '\r' | '\t');
-        (c.is_control() && !break_ok) || HIDDEN_OR_REORDERING.contains(c)
+        let break_ok = kind == TextKind::Prose && matches!(c, '\n' | '\r' | '\t');
+        let invisible = kind == TextKind::Exact && INVISIBLE_IN_EXACT_FIELDS.contains(c);
+        (c.is_control() && !break_ok) || ALWAYS_REFUSED.contains(c) || invisible
     });
 
     if let Some(c) = offending {
@@ -405,13 +440,13 @@ fn validate_extension_value(value: &serde_json::Value, depth: usize) -> Result<(
     }
     match value {
         serde_json::Value::String(text) => {
-            validate_document_text("extension value", text, LineBreaks::Allowed)
+            validate_document_text("extension value", text, TextKind::Prose)
         }
         serde_json::Value::Array(items) => items
             .iter()
             .try_for_each(|item| validate_extension_value(item, depth + 1)),
         serde_json::Value::Object(members) => members.iter().try_for_each(|(name, item)| {
-            validate_document_text("extension member name", name, LineBreaks::Forbidden)?;
+            validate_document_text("extension member name", name, TextKind::Exact)?;
             validate_extension_value(item, depth + 1)
         }),
         _ => Ok(()),
@@ -451,6 +486,18 @@ pub fn validate_tags(tags: &[OpenApiTag]) -> Result<()> {
                 tag.name
             );
         }
+    }
+
+    // Checked last, so that a list with something individually wrong is told
+    // which entry rather than told it is large.
+    let serialised = serde_json::to_string(tags)
+        .context("the declared OpenAPI tag groups cannot be serialised")?;
+    if serialised.len() > MAX_DECLARED_TAGS_BYTES {
+        anyhow::bail!(
+            "the declared OpenAPI tag groups serialise to {} bytes, more than the \
+             {MAX_DECLARED_TAGS_BYTES} allowed",
+            serialised.len()
+        );
     }
     Ok(())
 }
@@ -569,14 +616,14 @@ pub fn validate_document_metadata(
     if version.chars().count() > MAX_DOCUMENT_TITLE_LEN {
         anyhow::bail!("`version` is longer than {MAX_DOCUMENT_TITLE_LEN} characters");
     }
-    validate_document_text("title", title, LineBreaks::Forbidden)?;
-    validate_document_text("version", version, LineBreaks::Forbidden)?;
+    validate_document_text("title", title, TextKind::Line)?;
+    validate_document_text("version", version, TextKind::Line)?;
 
     if let Some(description) = description {
         if description.chars().count() > MAX_DOCUMENT_DESCRIPTION_LEN {
             anyhow::bail!("`description` is longer than {MAX_DOCUMENT_DESCRIPTION_LEN} characters");
         }
-        validate_document_text("description", description, LineBreaks::Allowed)?;
+        validate_document_text("description", description, TextKind::Prose)?;
     }
     Ok(())
 }
@@ -1926,11 +1973,12 @@ mod tests {
 
     /// `is_control()` is `Cc` and nothing else, so the rest are listed by hand.
     ///
-    /// A zero-width character is the case that matters: it renders as nothing,
-    /// so the name reads as `Orders` in a sidebar and matches no operation —
-    /// the invisible ghost group the `trim()` check refuses the visible form of.
+    /// A name is matched against an operation's tag character for character, so
+    /// one that renders as nothing is a forgery: the name reads as `Orders` in
+    /// a sidebar, matches no operation, and is the invisible ghost group the
+    /// `trim()` check refuses the visible form of.
     #[test]
-    fn characters_that_hide_or_reorder_are_refused_though_they_are_not_control() {
+    fn characters_that_hide_or_reorder_are_refused_in_a_name() {
         for c in [
             '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{00AD}', '\u{FEFF}', '\u{2028}',
             '\u{2029}', '\u{202E}',
@@ -1945,6 +1993,16 @@ mod tests {
                 "U+{:04X} in a name is accepted",
                 c as u32
             );
+        }
+    }
+
+    /// Reordering a reader's text, or ending a line for whatever consumes the
+    /// document, is a lie about it in any field — prose included.
+    #[test]
+    fn characters_that_reorder_or_end_a_line_are_refused_in_prose_too() {
+        for c in [
+            '\u{202E}', '\u{061C}', '\u{2066}', '\u{202A}', '\u{2028}', '\u{2029}',
+        ] {
             assert!(
                 OpenApiTag::new("Orders")
                     .unwrap()
@@ -1954,6 +2012,110 @@ mod tests {
                 c as u32
             );
         }
+    }
+
+    /// Prose is written in languages, and some of them need a joiner.
+    ///
+    /// U+200C is a required orthographic character in Persian, Hindi and
+    /// Bengali, and U+200D is what holds the parts of one emoji together.
+    /// Refusing them in prose would not be a security win — it would be a rule
+    /// about which languages this gateway's documentation may be written in.
+    #[test]
+    fn prose_may_carry_a_joiner_and_an_emoji_where_a_name_may_not() {
+        let tag = OpenApiTag::new("Orders").unwrap();
+        assert!(
+            tag.clone()
+                .with_description("a zero\u{200C}width non-joiner, as Persian is spelled")
+                .is_ok(),
+            "U+200C is an orthographic character, not an attack"
+        );
+        assert!(
+            tag.with_description("Orders, \u{1F468}\u{200D}\u{1F4BB} and who places them")
+                .is_ok(),
+            "U+200D is what makes one emoji out of three code points"
+        );
+
+        assert!(
+            validate_document_metadata(
+                "Example \u{1F468}\u{200D}\u{1F4BB}",
+                "0.1.0",
+                Some("Fine\u{200C}print")
+            )
+            .is_ok(),
+            "a title is a line shown to a reader, not an identity matched by equality"
+        );
+        assert!(
+            OpenApiTag::new("Orders\u{200D}Placed").is_err(),
+            "the same character in a name is still a forgery"
+        );
+    }
+
+    /// The `x-*` name is bounded like every other string on the group.
+    #[test]
+    fn an_extension_name_is_bounded() {
+        let tag = OpenApiTag::new("Orders").unwrap();
+
+        let at_cap = format!("x-{}", "o".repeat(MAX_EXTENSION_KEY_LEN - 2));
+        assert_eq!(at_cap.chars().count(), MAX_EXTENSION_KEY_LEN);
+        assert!(
+            tag.clone()
+                .with_extension(at_cap, serde_json::json!("v"))
+                .is_ok(),
+            "a name exactly at the cap is within it"
+        );
+        assert!(
+            tag.with_extension(
+                format!("x-{}", "o".repeat(MAX_EXTENSION_KEY_LEN - 1)),
+                serde_json::json!("v")
+            )
+            .is_err(),
+            "one character past it is past it"
+        );
+    }
+
+    /// The link's description was the one string here with no length of its own.
+    #[test]
+    fn an_external_documentation_description_is_bounded() {
+        let docs = OpenApiExternalDocs::new("https://example.test/orders").unwrap();
+        assert!(
+            docs.clone()
+                .with_description("d".repeat(MAX_TAG_DESCRIPTION_LEN))
+                .is_ok(),
+            "at the cap is within it"
+        );
+        assert!(
+            docs.with_description("d".repeat(MAX_TAG_DESCRIPTION_LEN + 1))
+                .is_err(),
+            "it is bounded like the url beside it and the description above it"
+        );
+    }
+
+    /// Every group can be within every one of its bounds and the list still be
+    /// something no reader wants served.
+    #[test]
+    fn the_whole_declared_list_is_bounded_even_when_each_group_is() {
+        let filler = "d".repeat(MAX_TAG_DESCRIPTION_LEN);
+        let groups: Vec<OpenApiTag> = (0..MAX_DECLARED_TAGS)
+            .map(|i| {
+                OpenApiTag::new(format!("Group{i}"))
+                    .unwrap()
+                    .with_description(filler.as_str())
+                    .unwrap()
+                    .with_extension("x-note", serde_json::json!(filler.as_str()))
+                    .unwrap()
+            })
+            .collect();
+
+        assert!(
+            groups
+                .iter()
+                .all(|group| validate_tags(std::slice::from_ref(group)).is_ok()),
+            "every group is individually inside every cap it has"
+        );
+        assert!(
+            validate_tags(&groups).is_err(),
+            "the per-field caps multiply, so the total is bounded too"
+        );
     }
 
     /// The url is rendered as a link on `/docs`, in the gateway's own origin.
@@ -2017,9 +2179,21 @@ mod tests {
         );
         assert!(
             tag.clone()
-                .with_extension("x-logo", serde_json::json!({ "alt": "Or\u{200B}ders" }))
+                .with_extension("x-logo", serde_json::json!({ "alt": "Or\u{202E}ders" }))
                 .is_err(),
             "a string nested in an object is served just the same"
+        );
+        assert!(
+            tag.clone()
+                .with_extension("x-logo", serde_json::json!({ "al\u{200B}t": "Orders" }))
+                .is_err(),
+            "a member name is a name: an invisible character in one is a forgery"
+        );
+        assert!(
+            tag.clone()
+                .with_extension("x-displayName", serde_json::json!("Or\u{200C}ders"))
+                .is_ok(),
+            "but the value beside it is prose, and prose is spelled in languages"
         );
         assert!(
             tag.clone()

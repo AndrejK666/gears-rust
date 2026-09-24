@@ -23,7 +23,7 @@ pub use error_layer::{
     IntoCanonical, error_mapping_middleware, extract_trace_id, map_error_to_canonical,
 };
 pub use openapi_registry::{
-    LineBreaks, OpenApiExternalDocs, OpenApiInfo, OpenApiRegistry, OpenApiRegistryImpl, OpenApiTag,
+    OpenApiExternalDocs, OpenApiInfo, OpenApiRegistry, OpenApiRegistryImpl, OpenApiTag, TextKind,
     ensure_schema, validate_document_metadata, validate_document_text, validate_tags,
 };
 pub use operation_builder::{
