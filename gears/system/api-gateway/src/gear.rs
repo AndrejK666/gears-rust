@@ -1221,10 +1221,23 @@ impl toolkit::Gear for ApiGateway {
         // name, or a blank, over-long or control-character-bearing `title`,
         // `version` or `description`, makes an invalid OpenAPI document, and the
         // only place anyone would notice is a docs browser that quietly renders
-        // it wrong. Note that this is a new way for `init` to fail: an assembly
-        // that boots today with `openapi.title: ""` stops booting here, which
-        // the README says in as many words.
-        cfg.openapi.validate()?;
+        // it wrong.
+        //
+        // Gated on `enable_docs` because that whole justification is about a
+        // document served on an anonymous route and rendered on `/docs`. With
+        // docs off there is no such document: `add_openapi_routes` is the only
+        // caller of `build_openapi`, and it is gated the same way. Refusing to
+        // start there would be a new crash loop over metadata nobody reads,
+        // which is a bad trade for a feature an assembly opted out of.
+        //
+        // With docs on this is still a new way for `init` to fail — an assembly
+        // booting today with `openapi.title: ""` stops booting — which the
+        // README says in as many words. Checking here rather than leaving it to
+        // `build_openapi` in `rest_finalize` keeps the error beside the config
+        // that caused it.
+        if cfg.enable_docs {
+            cfg.openapi.validate()?;
+        }
         self.config.store(Arc::new(cfg.clone()));
 
         debug!(
@@ -1605,6 +1618,24 @@ mod tests {
             json["paths"]["/plain"]["get"]
                 .get("x-rate-limit-rps")
                 .is_none()
+        );
+    }
+
+    /// Gating the `init` check on `enable_docs` does not lose the guarantee.
+    ///
+    /// With docs disabled nothing is built and nothing is served, so `init` has
+    /// no reason to refuse the config. With docs enabled the document is built
+    /// here — and this is the path that serves it, so bad metadata is refused
+    /// on the way out even if the `init` check never ran.
+    #[test]
+    fn the_served_document_still_refuses_bad_metadata() {
+        let mut config = ApiGatewayConfig::default();
+        config.openapi.title = "  ".to_owned();
+        let api = ApiGateway::new(config);
+
+        assert!(
+            api.build_openapi().is_err(),
+            "the check that matters is the one on the path that builds the document"
         );
     }
 

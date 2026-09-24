@@ -61,8 +61,11 @@ renders it as a link on the `/docs` page, which is served from the gateway's own
 origin, so a `javascript:` or `data:` url there would be a script one click
 away. Extension values are checked the same way every other string here is — no
 control or direction-override characters anywhere inside them — and bounded: at
-most 32 members on one group, 4096 bytes per value once serialised, and eight
-levels of nesting.
+most 32 members on one group, 4096 bytes per value once serialised, eight levels
+of nesting, and 100 characters for an `x-*` member name. The whole `tags` list
+is bounded too, at 256 KiB serialised: the per-field caps multiply, and 200
+groups each at their individual limits is tens of megabytes re-serialised on
+every anonymous request.
 
 `name` is matched against an operation's tag by **exact string equality** — no
 trimming, no case folding. `Orders` and `orders` are two different groups, and
@@ -80,10 +83,22 @@ free of control and direction-override characters, which a folded YAML `title:`
 spanning two lines is not.
 
 So an assembly that boots today with `openapi.title: ""`, or with a title folded
-across lines, **stops booting after this change**. `init` fails naming the
-field, rather than serving an `info` block no generated client can use. Setting
-a title and a version is the fix; there is no way to opt back out, because there
-is no valid document on the other side of it.
+across lines, **stops booting after this change** — provided it serves
+documentation at all. The check is gated on `enable_docs`: with docs off no
+document is built and none is served, so there is nothing for it to protect and
+`init` does not refuse the config. With docs on, `init` fails naming the field,
+rather than serving an `info` block no generated client can use. Setting a title
+and a version is the fix.
+
+What is *not* refused is worth stating, because the rule differs by field. A
+name — a tag group's, an `x-*` member's — and a url are matched or resolved
+character for character, so a character that renders as nothing is a forgery
+there and is refused. A `title`, a `version` and any `description` are text for
+a reader: emoji, and the zero-width joiner that holds a single emoji together,
+and the zero-width non-joiner that Persian, Hindi and Bengali are spelled with,
+are all ordinary content and are accepted. Characters that reorder what a reader
+sees, or end a line for whatever consumes the document, are refused in every
+field regardless.
 
 Omit the key and the document carries no `tags` list, which is what it did
 before the key existed: documentation browsers then fall back to the order the
