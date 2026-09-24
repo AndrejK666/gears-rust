@@ -65,10 +65,11 @@ impl<R: SettingsRepository> Service<R> {
     /// Create or replace one named setting.
     ///
     /// The count bound applies to new keys only, so replacing a setting at the
-    /// bound still works. It holds under concurrency: a new key is counted
-    /// again after it is written, and taken back out if the write took the
-    /// caller over the bound. Two racing writes can then both be refused,
-    /// never both kept.
+    /// bound still works. It is checked once, after the write: a new key that
+    /// took the caller over the bound is taken back out and refused. One check
+    /// at that point holds under concurrency, where a check before the write
+    /// could not. Racing writes at the bound may both be refused, but never
+    /// both kept.
     pub async fn put_named_setting(
         &self,
         ctx: &SecurityContext,
@@ -105,17 +106,6 @@ impl<R: SettingsRepository> Service<R> {
             .find_named(&conn, &scope, tenant_id, user_id, key)
             .await?
             .is_none();
-        // Cheap early refusal; the check after the write is the one that holds.
-        if is_new
-            && over(
-                self.repo
-                    .count_named(&conn, &scope, tenant_id, user_id)
-                    .await?
-                    + 1,
-            )
-        {
-            return Err(too_many());
-        }
 
         let stored = self
             .repo

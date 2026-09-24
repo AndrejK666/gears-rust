@@ -655,6 +655,11 @@ mod tests {
             .await
             .expect_err("third new key");
         assert!(matches!(&err, DomainError::LimitReached(_)), "{err:?}");
+        assert_eq!(
+            service.get_named_setting(&ctx, "c").await.expect("read"),
+            None,
+            "the refused key was taken back out, not kept"
+        );
 
         service
             .put_named_setting(&ctx, "a", serde_json::json!(2))
@@ -951,5 +956,75 @@ mod tests {
             ),
             "the corrupt key itself still reports the corruption"
         );
+    }
+
+    /// The REST surface end to end: the gear's own routes and handlers, driven
+    /// in-process, with the status codes and bodies a client sees.
+    #[tokio::test]
+    async fn named_settings_over_http() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use axum::{Extension, Router};
+        use toolkit::api::OpenApiRegistryImpl;
+        use tower::ServiceExt;
+
+        let service = Arc::new(
+            named_service(ServiceConfig {
+                named_settings_per_user: 1,
+                ..ServiceConfig::default()
+            })
+            .await,
+        );
+        let openapi = OpenApiRegistryImpl::new();
+        let app = crate::api::rest::routes::register_routes(Router::new(), &openapi, service)
+            .layer(Extension(create_test_context()));
+
+        let call = |method: &str, path: &str, body: Option<&str>| {
+            let request = Request::builder()
+                .method(method)
+                .uri(format!("/simple-user-settings/v1/named-settings{path}"))
+                .header("content-type", "application/json")
+                .body(body.map_or_else(Body::empty, |b| Body::from(b.to_owned())))
+                .unwrap();
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+                let json = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default();
+                (status, json)
+            }
+        };
+
+        let (status, body) = call("PUT", "/portal.view", Some(r#"{"value":"table"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({"key": "portal.view", "value": "table"})
+        );
+
+        let (status, body) = call("GET", "/portal.view", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["value"], "table");
+
+        let (status, body) = call("GET", "", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["settings"].as_array().map(Vec::len), Some(1));
+
+        let (status, _) = call("GET", "/never.set", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = call("PUT", "/bad%20key", Some(r#"{"value":1}"#)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = call("PUT", "/second.key", Some(r#"{"value":1}"#)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "bound of 1 reached");
+
+        let (status, _) = call("DELETE", "/portal.view", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = call("DELETE", "/portal.view", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "deleting again is fine");
+        let (status, _) = call("GET", "/portal.view", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
