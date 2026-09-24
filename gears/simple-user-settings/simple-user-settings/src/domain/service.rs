@@ -1,4 +1,5 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::time::Duration;
 
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
@@ -6,6 +7,8 @@ use simple_user_settings_sdk::models::{
     SimpleUserSettings, SimpleUserSettingsPatch, SimpleUserSettingsUpdate,
 };
 use simple_user_settings_sdk::owner::SettingsOwnerResolver;
+use toolkit::client_hub::{ClientHub, ClientHubError};
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::DBProvider;
 use toolkit_macros::domain_model;
 use toolkit_security::{SecurityContext, pep_properties};
@@ -38,12 +41,15 @@ pub(crate) mod actions {
 #[domain_model]
 pub struct ServiceConfig {
     pub max_field_length: usize,
+    /// Upper bound on one call to the deployment's [`SettingsOwnerResolver`].
+    pub owner_resolver_timeout: Duration,
 }
 
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             max_field_length: 100,
+            owner_resolver_timeout: Duration::from_secs(2),
         }
     }
 }
@@ -58,9 +64,11 @@ pub struct Service<R: SettingsRepository> {
     repo: Arc<R>,
     policy_enforcer: PolicyEnforcer,
     config: ServiceConfig,
-    /// Supplied by the deployment in the REST phase; `Some(None)` means it
-    /// published none and the token subject is the key.
-    owner_resolver: OnceLock<Option<Arc<dyn SettingsOwnerResolver>>>,
+    /// Where the deployment's [`SettingsOwnerResolver`] is published, if it
+    /// publishes one. Read on every request rather than once at startup, so
+    /// there is no window in which the service is reachable but has not yet
+    /// seen the resolver.
+    hub: Arc<ClientHub>,
 }
 
 impl<R: SettingsRepository> Service<R> {
@@ -69,24 +77,14 @@ impl<R: SettingsRepository> Service<R> {
         repo: Arc<R>,
         policy_enforcer: PolicyEnforcer,
         config: ServiceConfig,
+        hub: Arc<ClientHub>,
     ) -> Self {
         Self {
             db,
             repo,
             policy_enforcer,
             config,
-            owner_resolver: OnceLock::new(),
-        }
-    }
-
-    /// Hand the service the deployment's view of who a caller is.
-    ///
-    /// Separate from `new` because the resolver comes from another gear, and
-    /// the REST phase is the first point at which every gear is known to have
-    /// initialized. Calling it twice is ignored.
-    pub fn attach_owner_resolver(&self, resolver: Option<Arc<dyn SettingsOwnerResolver>>) {
-        if self.owner_resolver.set(resolver).is_err() {
-            tracing::debug!("settings owner resolver already attached; keeping the first");
+            hub,
         }
     }
 
@@ -95,22 +93,44 @@ impl<R: SettingsRepository> Service<R> {
     /// The token subject unless the deployment published a resolver that knows
     /// better — see [`SettingsOwnerResolver`]. One place decides it, so a read
     /// and a write can never disagree about whose settings they are.
-    async fn owner_of(&self, ctx: &SecurityContext) -> Result<Uuid, DomainError> {
-        let Some(Some(resolver)) = self.owner_resolver.get() else {
+    async fn owner_of(&self, ctx: &SecurityContext, action: &str) -> Result<Uuid, DomainError> {
+        let Some(resolver) = self.owner_resolver(action)? else {
             return Ok(ctx.subject_id());
         };
-        Ok(resolver
-            .settings_owner(ctx)
-            .await
-            .map_err(DomainError::from)?
-            .unwrap_or_else(|| ctx.subject_id()))
+
+        let timeout = self.config.owner_resolver_timeout;
+        match tokio::time::timeout(timeout, resolver.settings_owner(ctx)).await {
+            Ok(Ok(owner)) => Ok(owner.unwrap_or_else(|| ctx.subject_id())),
+            Ok(Err(e)) => Err(resolver_failed(ctx, action, &e)),
+            Err(_) => Err(resolver_timed_out(ctx, action, timeout)),
+        }
+    }
+
+    /// The resolver the deployment has published, if any.
+    fn owner_resolver(
+        &self,
+        action: &str,
+    ) -> Result<Option<Arc<dyn SettingsOwnerResolver>>, DomainError> {
+        match self.hub.get::<dyn SettingsOwnerResolver>() {
+            Ok(resolver) => Ok(Some(resolver)),
+            Err(ClientHubError::NotFound { .. }) => Ok(None),
+            // Something is registered under the resolver's key but is not a
+            // resolver. Keying on the subject anyway would fork the settings
+            // of every caller the deployment meant to resolve.
+            Err(e) => {
+                tracing::error!(error = %e, action, "settings owner resolver lookup failed");
+                Err(DomainError::internal(format!(
+                    "settings owner resolver lookup failed: {e}"
+                )))
+            }
+        }
     }
 
     pub async fn get_settings(
         &self,
         ctx: &SecurityContext,
     ) -> Result<SimpleUserSettings, DomainError> {
-        let user_id = self.owner_of(ctx).await?;
+        let user_id = self.owner_of(ctx, actions::GET).await?;
         let tenant_id = ctx.subject_tenant_id();
 
         let scope = self
@@ -146,7 +166,7 @@ impl<R: SettingsRepository> Service<R> {
         self.validate_field(SettingsFields::THEME, &update.theme)?;
         self.validate_field(SettingsFields::LANGUAGE, &update.language)?;
 
-        let user_id = self.owner_of(ctx).await?;
+        let user_id = self.owner_of(ctx, actions::UPDATE).await?;
         let tenant_id = ctx.subject_tenant_id();
 
         let scope = self
@@ -188,7 +208,7 @@ impl<R: SettingsRepository> Service<R> {
             self.validate_field(SettingsFields::LANGUAGE, language)?;
         }
 
-        let user_id = self.owner_of(ctx).await?;
+        let user_id = self.owner_of(ctx, "patch").await?;
         let tenant_id = ctx.subject_tenant_id();
 
         let scope = self
@@ -219,5 +239,67 @@ impl<R: SettingsRepository> Service<R> {
             ));
         }
         Ok(())
+    }
+}
+
+/// Log a resolver's failure where the caller is known, and say what it means.
+fn resolver_failed(ctx: &SecurityContext, action: &str, e: &CanonicalError) -> DomainError {
+    tracing::error!(
+        error = %cause(e),
+        subject_id = %ctx.subject_id(),
+        tenant_id = %ctx.subject_tenant_id(),
+        action,
+        "settings owner resolution failed"
+    );
+    owner_error(e)
+}
+
+/// Log a resolver that ran over its bound; the request is worth retrying.
+fn resolver_timed_out(ctx: &SecurityContext, action: &str, timeout: Duration) -> DomainError {
+    tracing::error!(
+        timeout_ms = timeout.as_millis(),
+        subject_id = %ctx.subject_id(),
+        tenant_id = %ctx.subject_tenant_id(),
+        action,
+        "settings owner resolver did not answer in time"
+    );
+    DomainError::unavailable(format!(
+        "settings owner resolver did not answer within {}ms",
+        timeout.as_millis()
+    ))
+}
+
+/// What a resolver's failure means for the request, category by category.
+///
+/// A resolver that is down is worth retrying, one that refuses the caller is a
+/// denial, and anything else is ours to report as internal. The resolver's text
+/// travels only as the diagnostic, which the canonical mapping keeps off the
+/// wire.
+fn owner_error(e: &CanonicalError) -> DomainError {
+    let cause = cause(e);
+    match e {
+        CanonicalError::ServiceUnavailable { .. }
+        | CanonicalError::DeadlineExceeded { .. }
+        | CanonicalError::ResourceExhausted { .. }
+        | CanonicalError::Aborted { .. } => {
+            DomainError::unavailable(format!("settings owner resolver unavailable: {cause}"))
+        }
+        CanonicalError::PermissionDenied { .. } | CanonicalError::Unauthenticated { .. } => {
+            DomainError::forbidden(format!(
+                "settings owner resolver refused the caller: {cause}"
+            ))
+        }
+        _ => DomainError::internal(format!("settings owner resolution failed: {cause}")),
+    }
+}
+
+/// A resolver error as text that keeps its cause.
+///
+/// `Display` on an internal error prints the fixed public detail, and the
+/// resolver's actual reason sits in the diagnostic, so both are spelled out.
+fn cause(e: &CanonicalError) -> String {
+    match e.diagnostic() {
+        Some(diagnostic) => format!("{e} ({diagnostic})"),
+        None => e.to_string(),
     }
 }

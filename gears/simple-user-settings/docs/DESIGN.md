@@ -61,6 +61,12 @@ Free-form JSON storage. No enforced schema validation. Application responsible f
 
 <!-- fdd-id-content -->
 Handles CRUD operations. Enforces tenant scoping. Validates request payloads.
+
+Decides the user half of the key once per request: the token subject, unless the
+deployment has registered a `SettingsOwnerResolver` on the `ClientHub`, in which
+case its answer (bounded by `owner_resolver_timeout_ms`) is the key and the
+resource id sent to the PDP. The tenant half is always the caller's tenant. The
+contract a resolver must honour is on the trait in the SDK.
 <!-- fdd-id-content -->
 
 ### Database Repository
@@ -92,8 +98,10 @@ Persists settings to database. Uses toolkit-db for database access. Implements t
 
 <!-- fdd-id-content -->
 1. Client sends authenticated request with tenant context
-2. API layer validates authentication and authorization
-3. Settings service applies tenant scoping
+2. API layer validates authentication
+3. Settings service resolves the owner key (token subject, or the deployment's
+   `SettingsOwnerResolver`), asks the PDP whether the caller may act on it, and
+   applies tenant scoping
 4. Repository queries/updates database with security context
 5. Response returned to client
 
@@ -134,3 +142,4 @@ Persists settings to database. Uses toolkit-db for database access. Implements t
 | Date | Version | Author | Changes |
 |------|---------|--------|---------|
 | 2026-02-09 | 0.1.0 | System | Initial DESIGN for cypilot validation |
+| 2026-09-24 | 0.2.0 | Andrej Kuchma | Deployment-supplied `SettingsOwnerResolver` decides the user key |

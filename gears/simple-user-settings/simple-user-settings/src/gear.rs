@@ -1,12 +1,14 @@
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
 use toolkit::api::OpenApiRegistry;
+use toolkit::client_hub::ClientHubError;
 use toolkit::{Gear, GearCtx};
 use toolkit_db::DBProvider;
 use toolkit_db::DbError;
-use tracing::info;
+use tracing::{info, warn};
 
 use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 
@@ -21,19 +23,30 @@ use crate::infra::storage::sea_orm_repo::SeaOrmSettingsRepository;
 /// Type alias for the concrete service type with ORM repository.
 type ConcreteService = Service<SeaOrmSettingsRepository>;
 
-/// Who a caller is, as the deployment understands it.
+/// Say at startup which key settings are filed under.
 ///
-/// Looked up in the REST phase rather than in `init`: the resolver comes from
-/// another gear and this gear does not depend on it, so init order guarantees
-/// nothing — whereas every gear's `init` has run before any gear's REST phase.
-/// A deployment that publishes none keeps the token subject as the key, which
-/// is what this gear has always done.
-fn owner_resolver(ctx: &GearCtx) -> Option<Arc<dyn SettingsOwnerResolver>> {
-    let resolver = ctx.client_hub().get::<dyn SettingsOwnerResolver>().ok();
-    if resolver.is_some() {
-        info!("Settings gear: settings are keyed by the deployment's own user resolver");
+/// Only a report: the service reads the hub on every request, so a resolver
+/// registered after this point still takes effect. The line is there so an
+/// operator can confirm the intended wiring without a request.
+fn report_owner_key(ctx: &GearCtx) {
+    match owner_key(ctx) {
+        Ok(key) => info!("Settings gear: settings are keyed by {key}"),
+        Err(e) => warn!(
+            error = %e,
+            "Settings gear: SettingsOwnerResolver lookup failed; settings requests will fail until it is fixed"
+        ),
     }
-    resolver
+}
+
+/// What the user half of the settings key is, as the hub stands now.
+fn owner_key(ctx: &GearCtx) -> Result<&'static str, ClientHubError> {
+    match ctx.client_hub().get::<dyn SettingsOwnerResolver>() {
+        Ok(_) => Ok("the deployment's owner resolver"),
+        Err(ClientHubError::NotFound { .. }) => {
+            Ok("the token subject (no SettingsOwnerResolver registered)")
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[toolkit::gear(
@@ -80,8 +93,15 @@ impl Gear for SettingsGear {
 
         let service_config = ServiceConfig {
             max_field_length: cfg.max_field_length,
+            owner_resolver_timeout: Duration::from_millis(cfg.owner_resolver_timeout_ms),
         };
-        let service = Arc::new(Service::new(db, repo, policy_enforcer, service_config));
+        let service = Arc::new(Service::new(
+            db,
+            repo,
+            policy_enforcer,
+            service_config,
+            ctx.client_hub(),
+        ));
         self.service
             .set(service.clone())
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
@@ -108,7 +128,7 @@ impl toolkit::contracts::RestApiCapability for SettingsGear {
             .ok_or_else(|| anyhow::anyhow!("Service not initialized"))?
             .clone();
 
-        service.attach_owner_resolver(owner_resolver(ctx));
+        report_owner_key(ctx);
 
         let router = routes::register_routes(router, openapi, service);
         info!("Settings gear: REST routes registered successfully");

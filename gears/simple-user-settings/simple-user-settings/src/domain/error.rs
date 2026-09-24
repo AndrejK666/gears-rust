@@ -16,6 +16,10 @@ pub enum DomainError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    /// A collaborator the request needs is down or too slow; worth retrying.
+    #[error("Service unavailable: {0}")]
+    Unavailable(String),
+
     #[error("Database error: {0}")]
     Database(#[from] DbError),
 }
@@ -35,6 +39,10 @@ impl DomainError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::Unavailable(message.into())
+    }
 }
 
 // TODO(DE1302): `DomainError::Forbidden` and `DomainError::Internal` only carry
@@ -49,18 +57,5 @@ impl From<authz_resolver_sdk::EnforcerError> for DomainError {
             | authz_resolver_sdk::EnforcerError::CompileFailed(_) => Self::Forbidden(e.to_string()),
             authz_resolver_sdk::EnforcerError::EvaluationFailed(_) => Self::Internal(e.to_string()),
         }
-    }
-}
-
-/// A resolver that could not answer is an internal failure, not a denial.
-///
-/// The gear asked a collaborator "whose settings are these?" and got no answer;
-/// carrying on with the token subject would file the caller's settings under a
-/// key their next request may not produce, so the read fails instead.
-#[allow(unknown_lints, de1302_error_from_to_string)]
-impl From<toolkit_canonical_errors::CanonicalError> for DomainError {
-    fn from(e: toolkit_canonical_errors::CanonicalError) -> Self {
-        tracing::error!(error = %e, "settings owner resolution failed");
-        Self::Internal(e.to_string())
     }
 }
