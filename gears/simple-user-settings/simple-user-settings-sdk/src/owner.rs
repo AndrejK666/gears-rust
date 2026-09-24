@@ -113,6 +113,13 @@ pub trait SettingsOwnerResolver: Send + Sync + 'static {
     /// rather than guessing, because silently filing a person's settings under
     /// the wrong key is worse than telling them the read failed.
     ///
+    /// That is the gear's default, not a requirement on the deployment. An
+    /// implementation that prefers availability, and knows which of its callers
+    /// can safely fall back to the token subject (for example, callers that have
+    /// only one login), may map its own transient failures to `Ok(None)` for
+    /// them. The gear cannot make that call itself, because it cannot tell a
+    /// caller with one login from one with several.
+    ///
     /// The category carries through: `ServiceUnavailable`, `DeadlineExceeded`,
     /// `ResourceExhausted` and `Aborted` answer the request with
     /// `ServiceUnavailable`; `PermissionDenied` and `Unauthenticated` with the

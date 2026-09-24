@@ -78,6 +78,7 @@ impl toolkit::contracts::DatabaseCapability for SettingsGear {
 impl Gear for SettingsGear {
     async fn init(&self, ctx: &GearCtx) -> anyhow::Result<()> {
         let cfg: SettingsConfig = ctx.config_or_default()?;
+        cfg.validate()?;
 
         let db: Arc<DBProvider<DbError>> = Arc::new(ctx.db_required()?);
 

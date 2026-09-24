@@ -289,6 +289,14 @@ fn owner_error(e: &CanonicalError) -> DomainError {
                 "settings owner resolver refused the caller: {cause}"
             ))
         }
+        // Deliberately internal, and listed so the choice is visible:
+        // `Internal`, `Unknown`, `DataLoss`, `Cancelled`, `Unimplemented`,
+        // `InvalidArgument`, `OutOfRange`, `FailedPrecondition`,
+        // `AlreadyExists` and `NotFound`. None of them is something the
+        // settings caller did or can fix. In particular, "this caller is not
+        // in my directory" is not `NotFound`: the contract answers it with
+        // `Ok(None)`. `CanonicalError` is `#[non_exhaustive]`, so a category
+        // added later lands here too until it is placed above.
         _ => DomainError::internal(format!("settings owner resolution failed: {cause}")),
     }
 }

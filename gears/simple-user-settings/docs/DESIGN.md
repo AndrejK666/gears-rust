@@ -67,6 +67,13 @@ deployment has registered a `SettingsOwnerResolver` on the `ClientHub`, in which
 case its answer (bounded by `owner_resolver_timeout_ms`) is the key and the
 resource id sent to the PDP. The tenant half is always the caller's tenant. The
 contract a resolver must honour is on the trait in the SDK.
+
+The gear does not retry a resolver call. A failure or a timeout is answered once:
+unavailable-like categories and timeouts as `503 Service Unavailable`, refusals
+as the usual masked denial, anything else as `500`. Retrying is the caller's
+choice, and it is safe: the lookup is a read with no side effects, and nothing is
+written before it succeeds. `owner_resolver_timeout_ms` must be between 1 and
+30000; the gear refuses to start otherwise.
 <!-- fdd-id-content -->
 
 ### Database Repository
