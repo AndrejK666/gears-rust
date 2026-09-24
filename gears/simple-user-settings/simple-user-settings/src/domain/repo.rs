@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use simple_user_settings_sdk::models::{SimpleUserSettings, SimpleUserSettingsPatch};
+use simple_user_settings_sdk::models::{NamedSetting, SimpleUserSettings, SimpleUserSettingsPatch};
 use toolkit::domain::DomainModel;
 use toolkit_db::secure::DBRunner;
 use toolkit_security::AccessScope;
@@ -37,4 +37,41 @@ where
         tenant_id: Uuid,
         patch: SimpleUserSettingsPatch,
     ) -> Result<SimpleUserSettings, DomainError>;
+
+    /// Every named setting in scope, ordered by key.
+    async fn list_named<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+    ) -> Result<Vec<NamedSetting>, DomainError>;
+
+    async fn find_named<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        key: &str,
+    ) -> Result<Option<NamedSetting>, DomainError>;
+
+    async fn count_named<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+    ) -> Result<u64, DomainError>;
+
+    async fn upsert_named<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        setting: NamedSetting,
+    ) -> Result<NamedSetting, DomainError>;
+
+    /// Delete one named setting in scope; `true` if a row was removed.
+    async fn delete_named<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        key: &str,
+    ) -> Result<bool, DomainError>;
 }

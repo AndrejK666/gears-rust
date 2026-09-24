@@ -3175,6 +3175,7 @@ dependencies = [
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
+ "serde_json",
  "uuid",
 ]
 

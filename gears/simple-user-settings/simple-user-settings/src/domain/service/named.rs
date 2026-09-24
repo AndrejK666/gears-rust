@@ -1,0 +1,147 @@
+//! Named settings: keyed JSON values next to the fixed `theme` and `language`.
+//!
+//! Filed under the same `(user, tenant)` and authorized as the same resource as
+//! the fixed fields, so a policy that governs a user's settings governs these
+//! too without learning a new resource type.
+
+use authz_resolver_sdk::pep::AccessRequest;
+use simple_user_settings_sdk::models::NamedSetting;
+use toolkit_security::{AccessScope, SecurityContext, pep_properties};
+use uuid::Uuid;
+
+use super::{SETTINGS_RESOURCE, Service, actions};
+use crate::domain::error::DomainError;
+use crate::domain::fields::SettingsFields;
+use crate::domain::repo::SettingsRepository;
+
+/// Longest key accepted, in bytes (keys are ASCII, so also characters).
+const MAX_KEY_LEN: usize = 128;
+
+/// Keys are short ASCII identifiers: they end up in URLs and in logs, and a
+/// product namespaces them with dots (`portal.projects.view`).
+fn validate_key(key: &str) -> Result<(), DomainError> {
+    let well_formed = !key.is_empty()
+        && key.len() <= MAX_KEY_LEN
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':'));
+    if well_formed {
+        Ok(())
+    } else {
+        Err(DomainError::validation(
+            SettingsFields::KEY,
+            format!("must be 1-{MAX_KEY_LEN} characters from A-Z a-z 0-9 . _ - :"),
+        ))
+    }
+}
+
+impl<R: SettingsRepository> Service<R> {
+    /// Every named setting the caller has, ordered by key.
+    pub async fn list_named_settings(
+        &self,
+        ctx: &SecurityContext,
+    ) -> Result<Vec<NamedSetting>, DomainError> {
+        let (scope, _, _) = self.named_scope(ctx, actions::GET).await?;
+        let conn = self.db.conn().map_err(DomainError::from)?;
+        self.repo.list_named(&conn, &scope).await
+    }
+
+    /// One named setting, or `None` if the caller has not set it.
+    pub async fn get_named_setting(
+        &self,
+        ctx: &SecurityContext,
+        key: &str,
+    ) -> Result<Option<NamedSetting>, DomainError> {
+        validate_key(key)?;
+        let (scope, _, _) = self.named_scope(ctx, actions::GET).await?;
+        let conn = self.db.conn().map_err(DomainError::from)?;
+        self.repo.find_named(&conn, &scope, key).await
+    }
+
+    /// Create or replace one named setting.
+    ///
+    /// The count bound applies to new keys only, so replacing a setting at the
+    /// bound still works. Two concurrent first writes of different keys can
+    /// both pass the check and land one over; the bound keeps the store a
+    /// preference store, it is not a quota.
+    pub async fn put_named_setting(
+        &self,
+        ctx: &SecurityContext,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<NamedSetting, DomainError> {
+        validate_key(key)?;
+        let size = serde_json::to_string(&value)
+            .map_err(|e| DomainError::internal(format!("named setting value: {e}")))?
+            .len();
+        if size > self.config.named_value_max_bytes {
+            return Err(DomainError::validation(
+                SettingsFields::VALUE,
+                format!(
+                    "exceeds maximum size of {} bytes as JSON",
+                    self.config.named_value_max_bytes
+                ),
+            ));
+        }
+
+        let (scope, user_id, tenant_id) = self.named_scope(ctx, actions::UPDATE).await?;
+        let conn = self.db.conn().map_err(DomainError::from)?;
+
+        if self.repo.find_named(&conn, &scope, key).await?.is_none() {
+            let held = self.repo.count_named(&conn, &scope).await?;
+            let limit = self.config.named_settings_per_user;
+            if usize::try_from(held).map_or(true, |held| held >= limit) {
+                return Err(DomainError::validation(
+                    SettingsFields::KEY,
+                    format!("at most {limit} named settings per user; delete one first"),
+                ));
+            }
+        }
+
+        self.repo
+            .upsert_named(
+                &conn,
+                &scope,
+                user_id,
+                tenant_id,
+                NamedSetting {
+                    key: key.to_owned(),
+                    value,
+                },
+            )
+            .await
+    }
+
+    /// Forget one named setting; `true` if it existed.
+    pub async fn delete_named_setting(
+        &self,
+        ctx: &SecurityContext,
+        key: &str,
+    ) -> Result<bool, DomainError> {
+        validate_key(key)?;
+        let (scope, _, _) = self.named_scope(ctx, actions::UPDATE).await?;
+        let conn = self.db.conn().map_err(DomainError::from)?;
+        self.repo.delete_named(&conn, &scope, key).await
+    }
+
+    /// The caller's key halves and the scope the PDP grants for `action`.
+    async fn named_scope(
+        &self,
+        ctx: &SecurityContext,
+        action: &str,
+    ) -> Result<(AccessScope, Uuid, Uuid), DomainError> {
+        let user_id = ctx.subject_id();
+        let tenant_id = ctx.subject_tenant_id();
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &SETTINGS_RESOURCE,
+                action,
+                Some(user_id),
+                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
+            )
+            .await?;
+        Ok((scope, user_id, tenant_id))
+    }
+}

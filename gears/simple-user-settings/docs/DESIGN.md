@@ -49,10 +49,16 @@ Free-form JSON storage. No enforced schema validation. Application responsible f
 **ID**: [ ] `p1` `fdd-user-settings-component-rest-v1`
 
 <!-- fdd-id-content -->
-- `GET /simple-user-settings/v1/settings` - Retrieve all settings
-- `GET /simple-user-settings/v1/settings/{key}` - Retrieve specific setting
-- `PUT /simple-user-settings/v1/settings` - Update settings
-- `DELETE /simple-user-settings/v1/settings/{key}` - Delete setting
+Fixed fields (`theme`, `language`):
+- `GET /simple-user-settings/v1/settings` - Retrieve the fixed fields (defaults when unset)
+- `POST /simple-user-settings/v1/settings` - Replace both fields
+- `PATCH /simple-user-settings/v1/settings` - Update the fields given
+
+Named settings (any key, JSON value):
+- `GET /simple-user-settings/v1/named-settings` - Retrieve all named settings, ordered by key
+- `GET /simple-user-settings/v1/named-settings/{key}` - Retrieve one; 404 if unset
+- `PUT /simple-user-settings/v1/named-settings/{key}` - Create or replace one
+- `DELETE /simple-user-settings/v1/named-settings/{key}` - Delete one; 204 whether or not it was set
 <!-- fdd-id-content -->
 
 ### Settings Service
@@ -73,16 +79,23 @@ Persists settings to database. Uses toolkit-db for database access. Implements t
 
 ## 5. Data Model
 
-**Settings Entity**:
-- `user_id`: User identifier (scoped to tenant)
-- `key`: Setting key
-- `value`: JSON value
-- `created_at`: Timestamp
-- `updated_at`: Timestamp
+**`settings`** (fixed fields, one row per user and tenant):
+- `tenant_id`, `user_id`: primary key `(tenant_id, user_id)`
+- `theme`, `language`: nullable text
 
-**Indexes**:
-- Primary key: `(tenant_id, user_id, key)`
-- Ensures fast lookups and tenant isolation
+**`named_settings`** (one row per user, tenant and key):
+- `tenant_id`, `user_id`, `key`: primary key `(tenant_id, user_id, key)`
+- `value`: the JSON value, serialized to text on every backend
+
+Both tables are scoped the same way (tenant column `tenant_id`, resource column
+`user_id`) and authorized as the same PDP resource, `simple_user_settings.settings`:
+reads need `get`, writes and deletes need `update`.
+
+**Bounds on named settings** (configurable):
+- key: 1–128 characters from `A–Z a–z 0–9 . _ - :`
+- value: `named_value_max_bytes` as serialized JSON (default 4096)
+- count: `named_settings_per_user` per user and tenant (default 256); applies to
+  new keys only, so replacing a value at the bound still works
 
 ## 6. Sequences
 
@@ -100,28 +113,15 @@ Persists settings to database. Uses toolkit-db for database access. Implements t
 **Components**: `fdd-user-settings-component-rest-v1`, `fdd-user-settings-component-service-v1`, `fdd-user-settings-component-repository-v1`
 <!-- fdd-id-content -->
 
-## 7. Data Model
-
-**Settings Entity**:
-- `user_id`: User identifier (scoped to tenant)
-- `key`: Setting key
-- `value`: JSON value
-- `created_at`: Timestamp
-- `updated_at`: Timestamp
-
-**Indexes**:
-- Primary key: `(tenant_id, user_id, key)`
-- Ensures fast lookups and tenant isolation
-
-## 8. Error Handling
+## 7. Error Handling
 
 - Unauthenticated request → 401 Unauthorized
-- Missing tenant context → 403 Forbidden
-- Setting not found → 404 Not Found
-- Invalid JSON → 400 Bad Request
-- Data too large → 413 Payload Too Large
+- Out of the caller's scope → 404 Not Found (masked, so existence is not disclosed)
+- Named setting not set → 404 Not Found
+- Malformed key, oversized value, or a new key past the count bound → 400 Bad Request
+  with a field violation on `key` or `value`
 
-## 9. Dependencies
+## 8. Dependencies
 
 - toolkit-db for database access
 - toolkit-auth for authentication/authorization
@@ -134,3 +134,4 @@ Persists settings to database. Uses toolkit-db for database access. Implements t
 | Date | Version | Author | Changes |
 |------|---------|--------|---------|
 | 2026-02-09 | 0.1.0 | System | Initial DESIGN for cypilot validation |
+| 2026-09-24 | 0.2.0 | Andrej Kuchma | Named settings; data model and error handling brought in line with the code |

@@ -10,7 +10,7 @@ use tracing::info;
 
 use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 
-use simple_user_settings_sdk::SimpleUserSettingsClientV1;
+use simple_user_settings_sdk::{NamedSettingsClientV1, SimpleUserSettingsClientV1};
 
 use crate::api::rest::routes;
 use crate::config::SettingsConfig;
@@ -65,14 +65,19 @@ impl Gear for SettingsGear {
 
         let service_config = ServiceConfig {
             max_field_length: cfg.max_field_length,
+            named_settings_per_user: cfg.named_settings_per_user,
+            named_value_max_bytes: cfg.named_value_max_bytes,
         };
         let service = Arc::new(Service::new(db, repo, policy_enforcer, service_config));
         self.service
             .set(service.clone())
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
 
-        let local_client: Arc<dyn SimpleUserSettingsClientV1> = Arc::new(LocalClient::new(service));
-        ctx.client_hub().register(local_client);
+        let local_client = Arc::new(LocalClient::new(service));
+        let settings_client: Arc<dyn SimpleUserSettingsClientV1> = local_client.clone();
+        ctx.client_hub().register(settings_client);
+        let named_client: Arc<dyn NamedSettingsClientV1> = local_client;
+        ctx.client_hub().register(named_client);
 
         Ok(())
     }

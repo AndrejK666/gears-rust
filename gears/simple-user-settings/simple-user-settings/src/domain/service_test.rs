@@ -197,6 +197,7 @@ mod tests {
             db,
             ServiceConfig {
                 max_field_length: 10,
+                ..ServiceConfig::default()
             },
         );
         let ctx = create_test_context();
@@ -224,6 +225,7 @@ mod tests {
             db,
             ServiceConfig {
                 max_field_length: 10,
+                ..ServiceConfig::default()
             },
         );
         let ctx = create_test_context();
@@ -289,6 +291,7 @@ mod tests {
             db,
             ServiceConfig {
                 max_field_length: 10,
+                ..ServiceConfig::default()
             },
         );
         let ctx = create_test_context();
@@ -440,5 +443,314 @@ mod tests {
         assert_eq!(result.theme, None);
         assert_eq!(result.language, None);
         assert_eq!(result.tenant_id, tenant2.subject_tenant_id());
+    }
+
+    // =========================================================================
+    // named settings
+    // =========================================================================
+
+    async fn named_service(config: ServiceConfig) -> ConcreteService {
+        build_service(inmem_db().await, config)
+    }
+
+    /// Any JSON value goes in and comes back out unchanged.
+    #[tokio::test]
+    async fn a_named_setting_round_trips_any_json() {
+        let service = named_service(ServiceConfig::default()).await;
+        let ctx = create_test_context();
+
+        let values = [
+            ("portal.projects.view", serde_json::json!("table")),
+            ("portal.sidebar.width", serde_json::json!(280)),
+            (
+                "portal.hints.dismissed",
+                serde_json::json!(["welcome", "tour"]),
+            ),
+            ("portal.editor", serde_json::json!({"wrap": true, "tab": 4})),
+            ("portal.flag", serde_json::json!(null)),
+        ];
+        for (key, value) in &values {
+            let stored = service
+                .put_named_setting(&ctx, key, value.clone())
+                .await
+                .expect("stored");
+            assert_eq!(&stored.value, value);
+        }
+        for (key, value) in &values {
+            let seen = service
+                .get_named_setting(&ctx, key)
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(&seen.value, value, "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_named_setting_that_was_never_set_is_absent() {
+        let service = named_service(ServiceConfig::default()).await;
+        let seen = service
+            .get_named_setting(&create_test_context(), "portal.projects.view")
+            .await
+            .expect("read");
+        assert_eq!(seen, None);
+    }
+
+    #[tokio::test]
+    async fn putting_a_named_setting_again_replaces_it() {
+        let service = named_service(ServiceConfig::default()).await;
+        let ctx = create_test_context();
+
+        service
+            .put_named_setting(&ctx, "portal.projects.view", serde_json::json!("table"))
+            .await
+            .expect("first");
+        service
+            .put_named_setting(&ctx, "portal.projects.view", serde_json::json!("tiles"))
+            .await
+            .expect("second");
+
+        let all = service.list_named_settings(&ctx).await.expect("list");
+        assert_eq!(all.len(), 1, "replaced, not duplicated");
+        assert_eq!(all[0].value, serde_json::json!("tiles"));
+    }
+
+    #[tokio::test]
+    async fn named_settings_list_in_key_order() {
+        let service = named_service(ServiceConfig::default()).await;
+        let ctx = create_test_context();
+        for key in ["b.second", "c.third", "a.first"] {
+            service
+                .put_named_setting(&ctx, key, serde_json::json!(key))
+                .await
+                .expect("stored");
+        }
+
+        let keys: Vec<String> = service
+            .list_named_settings(&ctx)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
+        assert_eq!(keys, ["a.first", "b.second", "c.third"]);
+    }
+
+    /// Deleting says whether there was anything to delete, and deleting twice
+    /// is not an error.
+    #[tokio::test]
+    async fn deleting_a_named_setting_forgets_it() {
+        let service = named_service(ServiceConfig::default()).await;
+        let ctx = create_test_context();
+        service
+            .put_named_setting(&ctx, "portal.projects.view", serde_json::json!("table"))
+            .await
+            .expect("stored");
+
+        let existed = service
+            .delete_named_setting(&ctx, "portal.projects.view")
+            .await
+            .expect("deleted");
+        assert!(existed);
+        let again = service
+            .delete_named_setting(&ctx, "portal.projects.view")
+            .await
+            .expect("deleting again is fine");
+        assert!(!again);
+        assert_eq!(
+            service
+                .get_named_setting(&ctx, "portal.projects.view")
+                .await
+                .expect("read"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_keys_are_refused() {
+        let service = named_service(ServiceConfig::default()).await;
+        let ctx = create_test_context();
+        let too_long = "k".repeat(129);
+
+        for key in [
+            "",
+            "has space",
+            "a/b",
+            "caf\u{e9}",
+            "a?b",
+            too_long.as_str(),
+        ] {
+            let err = service
+                .put_named_setting(&ctx, key, serde_json::json!(1))
+                .await
+                .expect_err("refused");
+            assert!(
+                matches!(&err, DomainError::Validation { field, .. } if field == "key"),
+                "{key:?}: {err:?}"
+            );
+            assert!(
+                service.get_named_setting(&ctx, key).await.is_err(),
+                "reads validate too: {key:?}"
+            );
+        }
+
+        let longest = "k".repeat(128);
+        service
+            .put_named_setting(&ctx, &longest, serde_json::json!(1))
+            .await
+            .expect("128 characters is allowed");
+        service
+            .put_named_setting(&ctx, "Portal_2.view-mode:v1", serde_json::json!(1))
+            .await
+            .expect("every allowed punctuation mark");
+    }
+
+    #[tokio::test]
+    async fn a_named_value_over_the_size_bound_is_refused() {
+        let service = named_service(ServiceConfig {
+            named_value_max_bytes: 10,
+            ..ServiceConfig::default()
+        })
+        .await;
+        let ctx = create_test_context();
+
+        // `"12345678"` is exactly 10 bytes as JSON, quotes included.
+        service
+            .put_named_setting(&ctx, "fits", serde_json::json!("12345678"))
+            .await
+            .expect("at the bound");
+        let err = service
+            .put_named_setting(&ctx, "too.big", serde_json::json!("123456789"))
+            .await
+            .expect_err("over the bound");
+        assert!(
+            matches!(&err, DomainError::Validation { field, .. } if field == "value"),
+            "{err:?}"
+        );
+    }
+
+    /// The count bound stops new keys, not replacements, and frees up again
+    /// once a key is deleted.
+    #[tokio::test]
+    async fn the_named_setting_count_bound_applies_to_new_keys() {
+        let service = named_service(ServiceConfig {
+            named_settings_per_user: 2,
+            ..ServiceConfig::default()
+        })
+        .await;
+        let ctx = create_test_context();
+        let one = serde_json::json!(1);
+
+        service
+            .put_named_setting(&ctx, "a", one.clone())
+            .await
+            .expect("first");
+        service
+            .put_named_setting(&ctx, "b", one.clone())
+            .await
+            .expect("second");
+
+        let err = service
+            .put_named_setting(&ctx, "c", one.clone())
+            .await
+            .expect_err("third new key");
+        assert!(
+            matches!(&err, DomainError::Validation { field, .. } if field == "key"),
+            "{err:?}"
+        );
+
+        service
+            .put_named_setting(&ctx, "a", serde_json::json!(2))
+            .await
+            .expect("replacing at the bound");
+
+        service
+            .delete_named_setting(&ctx, "b")
+            .await
+            .expect("delete");
+        service
+            .put_named_setting(&ctx, "c", one)
+            .await
+            .expect("room again after a delete");
+    }
+
+    #[tokio::test]
+    async fn named_settings_are_isolated_by_user_and_by_tenant() {
+        let service = named_service(ServiceConfig::default()).await;
+        let org = Uuid::new_v4();
+        let person = Uuid::new_v4();
+        let caller = |subject, tenant| {
+            SecurityContext::builder()
+                .subject_id(subject)
+                .subject_tenant_id(tenant)
+                .build()
+                .unwrap()
+        };
+        let owner = caller(person, org);
+        let colleague = caller(Uuid::new_v4(), org);
+        let owner_elsewhere = caller(person, Uuid::new_v4());
+
+        service
+            .put_named_setting(&owner, "portal.projects.view", serde_json::json!("table"))
+            .await
+            .expect("stored");
+
+        for other in [&colleague, &owner_elsewhere] {
+            assert!(
+                service
+                    .list_named_settings(other)
+                    .await
+                    .expect("list")
+                    .is_empty()
+            );
+            assert_eq!(
+                service
+                    .get_named_setting(other, "portal.projects.view")
+                    .await
+                    .expect("read"),
+                None
+            );
+            assert!(
+                !service
+                    .delete_named_setting(other, "portal.projects.view")
+                    .await
+                    .expect("delete"),
+                "cannot delete someone else's setting"
+            );
+        }
+
+        assert!(
+            service
+                .get_named_setting(&owner, "portal.projects.view")
+                .await
+                .expect("read")
+                .is_some(),
+            "still there for the owner"
+        );
+    }
+
+    /// Named settings live beside the fixed fields and leave them alone.
+    #[tokio::test]
+    async fn named_settings_do_not_touch_theme_and_language() {
+        let service = named_service(ServiceConfig::default()).await;
+        let ctx = create_test_context();
+        service
+            .update_settings(
+                &ctx,
+                SimpleUserSettingsUpdate {
+                    theme: "dark".to_owned(),
+                    language: "en".to_owned(),
+                },
+            )
+            .await
+            .expect("fixed fields");
+
+        service
+            .put_named_setting(&ctx, "theme", serde_json::json!("light"))
+            .await
+            .expect("a named key may share a fixed field's name");
+
+        let fixed = service.get_settings(&ctx).await.expect("read");
+        assert_eq!(fixed.theme.as_deref(), Some("dark"));
     }
 }

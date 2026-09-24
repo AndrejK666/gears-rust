@@ -97,4 +97,29 @@ mod tests {
         assert_eq!(req.theme, Some("dark".to_owned()));
         assert_eq!(req.language, None);
     }
+
+    #[test]
+    fn test_put_named_setting_request_takes_any_json_value() {
+        let req: dto::PutNamedSettingRequest =
+            serde_json::from_str(r#"{"value":{"wrap":true,"tab":4}}"#).unwrap();
+        assert_eq!(req.value, serde_json::json!({"wrap": true, "tab": 4}));
+
+        let req: dto::PutNamedSettingRequest = serde_json::from_str(r#"{"value":null}"#).unwrap();
+        assert_eq!(req.value, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_named_settings_list_serialization() {
+        let dto = dto::NamedSettingsListDto {
+            settings: vec![dto::NamedSettingDto {
+                key: "portal.projects.view".to_owned(),
+                value: serde_json::json!("table"),
+            }],
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"settings": [{"key": "portal.projects.view", "value": "table"}]})
+        );
+    }
 }
