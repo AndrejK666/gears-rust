@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS named_settings (
 CREATE TABLE IF NOT EXISTS named_settings (
     tenant_id VARCHAR(36) NOT NULL,
     user_id VARCHAR(36) NOT NULL,
-    `key` VARCHAR(128) NOT NULL,
+    `key` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
     value TEXT NOT NULL,
     PRIMARY KEY (tenant_id, user_id, `key`)
 );

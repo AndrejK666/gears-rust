@@ -852,4 +852,56 @@ mod tests {
                 .is_some()
         );
     }
+
+    /// The `ClientHub` surface other gears use: the registered
+    /// `NamedSettingsClientV1` resolves to the local client and keeps the SDK's
+    /// `Option` / `bool` / canonical-error semantics.
+    #[tokio::test]
+    async fn named_settings_work_through_the_client_hub() {
+        use crate::domain::local_client::LocalClient;
+        use simple_user_settings_sdk::NamedSettingsClientV1;
+        use toolkit::ClientHub;
+
+        let service = Arc::new(named_service(ServiceConfig::default()).await);
+        let hub = ClientHub::new();
+        let client: Arc<dyn NamedSettingsClientV1> = Arc::new(LocalClient::new(service));
+        hub.register(client);
+        let named = hub.get::<dyn NamedSettingsClientV1>().expect("registered");
+        let ctx = create_test_context();
+
+        assert_eq!(
+            named.get_named_setting(&ctx, "a.key").await.expect("get"),
+            None
+        );
+        let stored = named
+            .put_named_setting(&ctx, "a.key", serde_json::json!({"x": 1}))
+            .await
+            .expect("put");
+        assert_eq!(stored.value, serde_json::json!({"x": 1}));
+        assert_eq!(
+            named.list_named_settings(&ctx).await.expect("list"),
+            vec![stored]
+        );
+        assert!(
+            named
+                .delete_named_setting(&ctx, "a.key")
+                .await
+                .expect("delete")
+        );
+        assert!(
+            !named
+                .delete_named_setting(&ctx, "a.key")
+                .await
+                .expect("again")
+        );
+
+        let err = named
+            .put_named_setting(&ctx, "bad key", serde_json::json!(1))
+            .await
+            .expect_err("malformed key");
+        assert!(
+            matches!(err, CanonicalError::InvalidArgument { .. }),
+            "got {err:?}"
+        );
+    }
 }

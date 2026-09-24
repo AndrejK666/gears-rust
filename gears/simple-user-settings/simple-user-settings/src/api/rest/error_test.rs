@@ -101,4 +101,20 @@ mod tests {
         assert_eq!(problem.status, Some(500));
         assert!(!problem.detail.contains("db pool exhausted"));
     }
+
+    #[test]
+    fn test_named_key_validation_is_400_with_the_key_field() {
+        let problem = wire(DomainError::validation(
+            "key",
+            "must be 1-128 characters from A-Z a-z 0-9 . _ - :",
+        ));
+
+        assert_eq!(problem.status, Some(400));
+        let violation = problem
+            .context
+            .get("field_violations")
+            .and_then(|v| v.get(0))
+            .expect("a field violation");
+        assert_eq!(violation.get("field").and_then(|v| v.as_str()), Some("key"));
+    }
 }

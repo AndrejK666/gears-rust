@@ -41,9 +41,11 @@ impl<R: SettingsRepository> Service<R> {
         &self,
         ctx: &SecurityContext,
     ) -> Result<Vec<NamedSetting>, DomainError> {
-        let (scope, user_id, _) = self.named_scope(ctx, actions::GET).await?;
+        let (scope, user_id, tenant_id) = self.named_scope(ctx, actions::GET).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
-        self.repo.list_named(&conn, &scope, user_id).await
+        self.repo
+            .list_named(&conn, &scope, tenant_id, user_id)
+            .await
     }
 
     /// One named setting, or `None` if the caller has not set it.
@@ -53,17 +55,20 @@ impl<R: SettingsRepository> Service<R> {
         key: &str,
     ) -> Result<Option<NamedSetting>, DomainError> {
         validate_key(key)?;
-        let (scope, user_id, _) = self.named_scope(ctx, actions::GET).await?;
+        let (scope, user_id, tenant_id) = self.named_scope(ctx, actions::GET).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
-        self.repo.find_named(&conn, &scope, user_id, key).await
+        self.repo
+            .find_named(&conn, &scope, tenant_id, user_id, key)
+            .await
     }
 
     /// Create or replace one named setting.
     ///
     /// The count bound applies to new keys only, so replacing a setting at the
-    /// bound still works. Two concurrent first writes of different keys can
-    /// both pass the check and land one over; the bound keeps the store a
-    /// preference store, it is not a quota.
+    /// bound still works. It holds under concurrency: a new key is counted
+    /// again after it is written, and taken back out if the write took the
+    /// caller over the bound. Two racing writes can then both be refused,
+    /// never both kept.
     pub async fn put_named_setting(
         &self,
         ctx: &SecurityContext,
@@ -87,23 +92,34 @@ impl<R: SettingsRepository> Service<R> {
         let (scope, user_id, tenant_id) = self.named_scope(ctx, actions::UPDATE).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        if self
+        let limit = self.config.named_settings_per_user;
+        let over = |held: u64| usize::try_from(held).map_or(true, |held| held > limit);
+        let too_many = || {
+            DomainError::validation(
+                SettingsFields::KEY,
+                format!("at most {limit} named settings per user; delete one first"),
+            )
+        };
+
+        let is_new = self
             .repo
-            .find_named(&conn, &scope, user_id, key)
+            .find_named(&conn, &scope, tenant_id, user_id, key)
             .await?
-            .is_none()
+            .is_none();
+        // Cheap early refusal; the check after the write is the one that holds.
+        if is_new
+            && over(
+                self.repo
+                    .count_named(&conn, &scope, tenant_id, user_id)
+                    .await?
+                    + 1,
+            )
         {
-            let held = self.repo.count_named(&conn, &scope, user_id).await?;
-            let limit = self.config.named_settings_per_user;
-            if usize::try_from(held).map_or(true, |held| held >= limit) {
-                return Err(DomainError::validation(
-                    SettingsFields::KEY,
-                    format!("at most {limit} named settings per user; delete one first"),
-                ));
-            }
+            return Err(too_many());
         }
 
-        self.repo
+        let stored = self
+            .repo
             .upsert_named(
                 &conn,
                 &scope,
@@ -114,7 +130,21 @@ impl<R: SettingsRepository> Service<R> {
                     value,
                 },
             )
-            .await
+            .await?;
+
+        if is_new
+            && over(
+                self.repo
+                    .count_named(&conn, &scope, tenant_id, user_id)
+                    .await?,
+            )
+        {
+            self.repo
+                .delete_named(&conn, &scope, tenant_id, user_id, key)
+                .await?;
+            return Err(too_many());
+        }
+        Ok(stored)
     }
 
     /// Forget one named setting; `true` if it existed.
@@ -124,9 +154,11 @@ impl<R: SettingsRepository> Service<R> {
         key: &str,
     ) -> Result<bool, DomainError> {
         validate_key(key)?;
-        let (scope, user_id, _) = self.named_scope(ctx, actions::UPDATE).await?;
+        let (scope, user_id, tenant_id) = self.named_scope(ctx, actions::UPDATE).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
-        self.repo.delete_named(&conn, &scope, user_id, key).await
+        self.repo
+            .delete_named(&conn, &scope, tenant_id, user_id, key)
+            .await
     }
 
     /// The caller's key halves and the scope the PDP grants for `action`.

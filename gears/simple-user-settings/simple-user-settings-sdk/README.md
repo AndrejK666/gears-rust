@@ -37,7 +37,14 @@ named.delete_named_setting(&ctx, "portal.projects.view").await?;         // true
 
 Keys are 1–128 characters from `A–Z a–z 0–9 . _ - :`; namespace them yourself
 (a dotted product prefix is the usual shape). Values and the number of keys per
-user are bounded by the gear's configuration. Over REST the same operations are
+user are bounded by the gear's configuration.
+
+The store is one per user and tenant, shared by every product in the deployment
+that writes to it. There is no per-product namespace, quota or policy: the key
+count bound (`named_settings_per_user`, default 256) is one budget for all of
+them, and every key is authorized as the same resource as `theme`/`language`.
+It is meant for small UI preferences. A product that needs its own quota, or a
+different access policy for its keys, needs its own store. Over REST the same operations are
 `GET|PUT|DELETE /simple-user-settings/v1/named-settings/{key}` and
 `GET /simple-user-settings/v1/named-settings`.
 

@@ -43,6 +43,7 @@ where
         &self,
         conn: &C,
         scope: &AccessScope,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Vec<NamedSetting>, DomainError>;
 
@@ -50,6 +51,7 @@ where
         &self,
         conn: &C,
         scope: &AccessScope,
+        tenant_id: Uuid,
         user_id: Uuid,
         key: &str,
     ) -> Result<Option<NamedSetting>, DomainError>;
@@ -58,6 +60,7 @@ where
         &self,
         conn: &C,
         scope: &AccessScope,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<u64, DomainError>;
 
@@ -75,6 +78,7 @@ where
         &self,
         conn: &C,
         scope: &AccessScope,
+        tenant_id: Uuid,
         user_id: Uuid,
         key: &str,
     ) -> Result<bool, DomainError>;

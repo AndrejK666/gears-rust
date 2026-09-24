@@ -29,14 +29,16 @@ fn named_from_row(row: named_entity::Model) -> Result<NamedSetting, DomainError>
 }
 
 /// The caller's own rows. The PDP scope says what the caller may touch, and a
-/// tenant-wide grant is a legitimate answer; which user's rows these are is
-/// always pinned here.
-fn owned_by(user_id: Uuid) -> Condition {
-    Condition::all().add(named_entity::Column::UserId.eq(user_id))
+/// tenant-wide or multi-tenant grant is a legitimate answer; whose rows these
+/// are, and in which tenant, is always pinned here.
+fn owned_by(tenant_id: Uuid, user_id: Uuid) -> Condition {
+    Condition::all()
+        .add(named_entity::Column::TenantId.eq(tenant_id))
+        .add(named_entity::Column::UserId.eq(user_id))
 }
 
-fn owned_key(user_id: Uuid, key: &str) -> Condition {
-    owned_by(user_id).add(named_entity::Column::Key.eq(key))
+fn owned_key(tenant_id: Uuid, user_id: Uuid, key: &str) -> Condition {
+    owned_by(tenant_id, user_id).add(named_entity::Column::Key.eq(key))
 }
 
 pub struct SeaOrmSettingsRepository;
@@ -175,12 +177,13 @@ impl SettingsRepository for SeaOrmSettingsRepository {
         &self,
         conn: &C,
         scope: &AccessScope,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Vec<NamedSetting>, DomainError> {
         NamedEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(owned_by(user_id))
+            .filter(owned_by(tenant_id, user_id))
             .order_by(named_entity::Column::Key, Order::Asc)
             .all(conn)
             .await
@@ -194,13 +197,14 @@ impl SettingsRepository for SeaOrmSettingsRepository {
         &self,
         conn: &C,
         scope: &AccessScope,
+        tenant_id: Uuid,
         user_id: Uuid,
         key: &str,
     ) -> Result<Option<NamedSetting>, DomainError> {
         NamedEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(owned_key(user_id, key))
+            .filter(owned_key(tenant_id, user_id, key))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -212,12 +216,13 @@ impl SettingsRepository for SeaOrmSettingsRepository {
         &self,
         conn: &C,
         scope: &AccessScope,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<u64, DomainError> {
         NamedEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(owned_by(user_id))
+            .filter(owned_by(tenant_id, user_id))
             .count(conn)
             .await
             .map_err(map_scope_error)
@@ -264,13 +269,14 @@ impl SettingsRepository for SeaOrmSettingsRepository {
         &self,
         conn: &C,
         scope: &AccessScope,
+        tenant_id: Uuid,
         user_id: Uuid,
         key: &str,
     ) -> Result<bool, DomainError> {
         let result = NamedEntity::delete_many()
             .secure()
             .scope_with(scope)
-            .filter(owned_key(user_id, key))
+            .filter(owned_key(tenant_id, user_id, key))
             .exec(conn)
             .await
             .map_err(map_scope_error)?;

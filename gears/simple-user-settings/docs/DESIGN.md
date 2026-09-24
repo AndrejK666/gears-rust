@@ -31,7 +31,12 @@ Tenant isolation enforced at DB layer. User authentication required. No anonymou
 **ID**: [ ] `p2` `fdd-user-settings-constraint-size-v1`
 
 <!-- fdd-id-content -->
-Maximum 1MB per user settings document. Individual key-value pairs limited to 100KB.
+Fixed fields: `theme` and `language` up to `max_field_length` (default 100).
+Named settings: each value up to `named_value_max_bytes` as serialized JSON
+(default 4096, at most 65535 — the smallest backend column, MySQL `TEXT`), and
+up to `named_settings_per_user` keys per user and tenant (default 256). There is
+no aggregate per-user cap beyond the product of the two. The gear refuses to
+start with a limit of 0 or a value bound above 65535.
 <!-- fdd-id-content -->
 
 ### Schema
@@ -112,6 +117,33 @@ reads need `get`, writes and deletes need `update`.
 
 **Components**: `fdd-user-settings-component-rest-v1`, `fdd-user-settings-component-service-v1`, `fdd-user-settings-component-repository-v1`
 <!-- fdd-id-content -->
+
+### Named settings lifecycle
+
+- **Delete is permanent.** `DELETE` removes the row; there is no tombstone,
+  history or undo. Deleting a key that is not set is a no-op that also answers
+  `204`.
+- **Retries are safe.** `PUT` is an upsert on `(tenant_id, user_id, key)` and
+  `DELETE` is idempotent, so a client that got no answer (a timeout, a dropped
+  connection) can repeat the same request. The gear itself does not retry. Its
+  database calls are bounded by the connection pool's acquire timeout
+  (toolkit-db configuration), and a failure surfaces as `500`.
+- **Count bound under concurrency.** The per-user key count is re-checked after a
+  new key is written, and the write is taken back if it went over. Racing writes
+  of new keys at the bound may both be refused; they are never both kept.
+
+### Migration and rollback
+
+- `002_named_settings` only adds the `named_settings` table; `settings` is
+  untouched, so the fixed-field endpoints keep working on either side of it.
+- The gear's migrations run in the database phase at startup, before its REST
+  routes are registered, so a node never serves `/named-settings` without the
+  table. During a rolling upgrade, nodes still on the previous version do not
+  have the routes at all; clients should treat `404` on `/named-settings` from an
+  old node as "not available yet".
+- Rolling back with `down()` drops `named_settings` and **deletes every stored
+  named setting**. To downgrade the gear while keeping the data, leave the table
+  in place: the previous version ignores it.
 
 ## 7. Error Handling
 

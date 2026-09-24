@@ -122,4 +122,10 @@ mod tests {
             serde_json::json!({"settings": [{"key": "portal.projects.view", "value": "table"}]})
         );
     }
+
+    #[test]
+    fn test_put_named_setting_request_requires_value() {
+        assert!(serde_json::from_str::<dto::PutNamedSettingRequest>("{}").is_err());
+        assert!(serde_json::from_str::<dto::PutNamedSettingRequest>(r#"{"val":1}"#).is_err());
+    }
 }
