@@ -82,4 +82,13 @@ where
         user_id: Uuid,
         key: &str,
     ) -> Result<bool, DomainError>;
+
+    /// Delete every named setting of `user_id` in scope; the number removed.
+    async fn delete_all_named<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, DomainError>;
 }

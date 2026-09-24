@@ -103,4 +103,14 @@ impl<R: SettingsRepository + 'static> NamedSettingsClientV1 for LocalClient<R> {
             .await
             .map_err(CanonicalError::from)
     }
+
+    async fn delete_all_named_settings(
+        &self,
+        ctx: &SecurityContext,
+    ) -> Result<u64, CanonicalError> {
+        self.service
+            .delete_all_named_settings(ctx)
+            .await
+            .map_err(CanonicalError::from)
+    }
 }

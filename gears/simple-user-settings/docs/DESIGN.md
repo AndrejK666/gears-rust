@@ -64,6 +64,7 @@ Named settings (any key, JSON value):
 - `GET /simple-user-settings/v1/named-settings/{key}` - Retrieve one; 404 if unset
 - `PUT /simple-user-settings/v1/named-settings/{key}` - Create or replace one
 - `DELETE /simple-user-settings/v1/named-settings/{key}` - Delete one; 204 whether or not it was set
+- `DELETE /simple-user-settings/v1/named-settings` - Delete all of the caller's named settings in one call (offboarding, erasure); 204
 <!-- fdd-id-content -->
 
 ### Settings Service

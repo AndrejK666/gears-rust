@@ -173,6 +173,24 @@ fn register_named_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .error_500(openapi)
         .register(router, openapi);
 
+    router = OperationBuilder::delete("/simple-user-settings/v1/named-settings")
+        .operation_id("simple_user_settings.delete_all_named_settings")
+        .summary("Delete all named settings")
+        .description(
+            "Forget every named setting of the authenticated user in one call, e.g. on \
+             offboarding or an erasure request. Answers 204 whether or not any were set; \
+             the fixed theme/language fields are not touched.",
+        )
+        .tag("Settings")
+        .authenticated()
+        .require_license_features::<License>([])
+        .handler(handlers::delete_all_named_settings)
+        .no_content_response(StatusCode::NO_CONTENT, "Named settings deleted (no body)")
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_500(openapi)
+        .register(router, openapi);
+
     router
 }
 

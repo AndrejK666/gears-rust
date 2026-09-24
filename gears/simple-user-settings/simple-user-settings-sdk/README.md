@@ -33,6 +33,7 @@ named.put_named_setting(&ctx, "portal.projects.view", json!("table")).await?;
 let view = named.get_named_setting(&ctx, "portal.projects.view").await?; // Option<NamedSetting>
 let all = named.list_named_settings(&ctx).await?;                        // ordered by key
 named.delete_named_setting(&ctx, "portal.projects.view").await?;         // true if it existed
+named.delete_all_named_settings(&ctx).await?;                             // how many were removed
 ```
 
 Keys are 1–128 characters from `A–Z a–z 0–9 . _ - :`; namespace them yourself
@@ -46,7 +47,7 @@ them, and every key is authorized as the same resource as `theme`/`language`.
 It is meant for small UI preferences. A product that needs its own quota, or a
 different access policy for its keys, needs its own store. Over REST the same operations are
 `GET|PUT|DELETE /simple-user-settings/v1/named-settings/{key}` and
-`GET /simple-user-settings/v1/named-settings`.
+`GET|DELETE /simple-user-settings/v1/named-settings` (list all, delete all).
 
 ## License
 

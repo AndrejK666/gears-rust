@@ -150,6 +150,20 @@ impl<R: SettingsRepository> Service<R> {
             .await
     }
 
+    /// Forget every named setting the caller has, in one statement; the number
+    /// removed. The erasure path for a user leaving: no need to list and delete
+    /// key by key.
+    pub async fn delete_all_named_settings(
+        &self,
+        ctx: &SecurityContext,
+    ) -> Result<u64, DomainError> {
+        let (scope, user_id, tenant_id) = self.named_scope(ctx, actions::UPDATE).await?;
+        let conn = self.db.conn().map_err(DomainError::from)?;
+        self.repo
+            .delete_all_named(&conn, &scope, tenant_id, user_id)
+            .await
+    }
+
     /// The caller's key halves and the scope the PDP grants for `action`.
     async fn named_scope(
         &self,

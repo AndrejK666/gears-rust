@@ -90,3 +90,12 @@ pub async fn delete_named_setting(
     svc.delete_named_setting(&ctx, &key).await?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// `204` whether or not anything was set, like the single-key delete.
+pub async fn delete_all_named_settings(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteService>>,
+) -> ApiResult<impl IntoResponse> {
+    svc.delete_all_named_settings(&ctx).await?;
+    Ok(StatusCode::NO_CONTENT)
+}

@@ -1026,5 +1026,145 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT, "deleting again is fine");
         let (status, _) = call("GET", "/portal.view", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = call("PUT", "/again.one", Some(r#"{"value":true}"#)).await;
+        assert_eq!(status, StatusCode::OK, "room again after the delete");
+        let (status, _) = call("DELETE", "", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "delete-all");
+        let (_, body) = call("GET", "", None).await;
+        assert_eq!(body["settings"], serde_json::json!([]), "nothing left");
+        let (status, _) = call("DELETE", "", None).await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "delete-all with nothing set"
+        );
+    }
+
+    /// The erasure path: one call removes every named setting of the caller,
+    /// and only the caller's, leaving the fixed fields alone.
+    #[tokio::test]
+    async fn delete_all_named_settings_removes_only_the_callers_rows() {
+        let service = named_service(ServiceConfig::default()).await;
+        let org = Uuid::new_v4();
+        let caller = |subject| {
+            SecurityContext::builder()
+                .subject_id(subject)
+                .subject_tenant_id(org)
+                .build()
+                .unwrap()
+        };
+        let leaving = caller(Uuid::from_u128(1));
+        let staying = caller(Uuid::from_u128(2));
+
+        service
+            .update_settings(
+                &leaving,
+                SimpleUserSettingsUpdate {
+                    theme: "dark".to_owned(),
+                    language: "en".to_owned(),
+                },
+            )
+            .await
+            .expect("fixed fields");
+        for key in ["a", "b", "c"] {
+            service
+                .put_named_setting(&leaving, key, serde_json::json!(key))
+                .await
+                .expect("stored");
+        }
+        service
+            .put_named_setting(&staying, "a", serde_json::json!("mine"))
+            .await
+            .expect("stored");
+
+        assert_eq!(
+            service
+                .delete_all_named_settings(&leaving)
+                .await
+                .expect("purge"),
+            3
+        );
+        assert!(
+            service
+                .list_named_settings(&leaving)
+                .await
+                .expect("list")
+                .is_empty()
+        );
+        assert_eq!(
+            service
+                .delete_all_named_settings(&leaving)
+                .await
+                .expect("again"),
+            0,
+            "nothing left is not an error"
+        );
+        assert_eq!(
+            service
+                .list_named_settings(&staying)
+                .await
+                .expect("list")
+                .len(),
+            1,
+            "another user's settings are untouched"
+        );
+        assert_eq!(
+            service
+                .get_settings(&leaving)
+                .await
+                .expect("read")
+                .theme
+                .as_deref(),
+            Some("dark"),
+            "the fixed fields are not part of it"
+        );
+    }
+
+    /// Both named bounds customised at once are each enforced, independently.
+    #[tokio::test]
+    async fn both_named_bounds_hold_together_when_both_are_customised() {
+        let service = named_service(ServiceConfig {
+            named_settings_per_user: 2,
+            named_value_max_bytes: 8,
+            ..ServiceConfig::default()
+        })
+        .await;
+        let ctx = create_test_context();
+
+        // `"123456"` is 8 bytes as JSON.
+        service
+            .put_named_setting(&ctx, "a", serde_json::json!("123456"))
+            .await
+            .expect("at the size bound");
+        let err = service
+            .put_named_setting(&ctx, "b", serde_json::json!("1234567"))
+            .await
+            .expect_err("over the size bound");
+        assert!(
+            matches!(&err, DomainError::Validation { field, .. } if field == "value"),
+            "{err:?}"
+        );
+        service
+            .put_named_setting(&ctx, "b", serde_json::json!(1))
+            .await
+            .expect("second key, small value");
+        let err = service
+            .put_named_setting(&ctx, "c", serde_json::json!(1))
+            .await
+            .expect_err("over the count bound");
+        assert!(matches!(&err, DomainError::LimitReached(_)), "{err:?}");
+        let err = service
+            .put_named_setting(&ctx, "c", serde_json::json!("far too large a value"))
+            .await
+            .expect_err("both bounds broken");
+        assert!(
+            matches!(&err, DomainError::Validation { field, .. } if field == "value"),
+            "the size check comes first, before anything is written: {err:?}"
+        );
+        assert_eq!(
+            service.list_named_settings(&ctx).await.expect("list").len(),
+            2
+        );
     }
 }

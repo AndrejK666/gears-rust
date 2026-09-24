@@ -292,4 +292,21 @@ impl SettingsRepository for SeaOrmSettingsRepository {
             .map_err(map_scope_error)?;
         Ok(result.rows_affected > 0)
     }
+
+    async fn delete_all_named<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, DomainError> {
+        let result = NamedEntity::delete_many()
+            .secure()
+            .scope_with(scope)
+            .filter(owned_by(tenant_id, user_id))
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(result.rows_affected)
+    }
 }

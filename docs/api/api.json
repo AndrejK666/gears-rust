@@ -52085,6 +52085,54 @@
       }
     },
     "/simple-user-settings/v1/named-settings": {
+      "delete": {
+        "description": "Forget every named setting of the authenticated user in one call, e.g. on offboarding or an erasure request. Answers 204 whether or not any were set; the fixed theme/language fields are not touched.",
+        "operationId": "simple_user_settings.delete_all_named_settings",
+        "responses": {
+          "204": {
+            "description": "Named settings deleted (no body)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete all named settings",
+        "tags": [
+          "Settings"
+        ]
+      },
       "get": {
         "description": "Every named setting of the authenticated user, ordered by key",
         "operationId": "simple_user_settings.list_named_settings",

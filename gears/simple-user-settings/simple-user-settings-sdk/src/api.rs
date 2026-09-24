@@ -98,4 +98,9 @@ pub trait NamedSettingsClientV1: Send + Sync {
         ctx: &SecurityContext,
         key: &str,
     ) -> Result<bool, CanonicalError>;
+
+    /// Forget every named setting the caller has, in one call. Returns how many
+    /// were removed; with none set it removes nothing and is not an error.
+    async fn delete_all_named_settings(&self, ctx: &SecurityContext)
+    -> Result<u64, CanonicalError>;
 }
