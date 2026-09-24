@@ -154,4 +154,41 @@ mod tests {
         assert!(other.service.get().is_none());
         assert!(gear.service.get().is_none());
     }
+
+    /// Hands `init` one gear section and nothing else.
+    struct Section(serde_json::Value);
+
+    impl toolkit::ConfigProvider for Section {
+        fn get_gear_config(&self, gear_name: &str) -> Option<&serde_json::Value> {
+            (gear_name == "simple-user-settings").then_some(&self.0)
+        }
+    }
+
+    /// The startup wiring, not just the validator: `init` must refuse an
+    /// out-of-range resolver timeout before it touches the database or the hub.
+    /// The context has neither, so reaching past validation would fail with a
+    /// different error.
+    #[tokio::test]
+    async fn init_refuses_an_out_of_range_resolver_timeout() {
+        for bad in [0, crate::config::MAX_OWNER_RESOLVER_TIMEOUT_MS + 1] {
+            let ctx = GearCtx::new(
+                "simple-user-settings",
+                uuid::Uuid::new_v4(),
+                Arc::new(Section(serde_json::json!({
+                    "config": { "owner_resolver_timeout_ms": bad }
+                }))),
+                Arc::new(toolkit::ClientHub::new()),
+                tokio_util::sync::CancellationToken::new(),
+            );
+
+            let err = SettingsGear::default()
+                .init(&ctx)
+                .await
+                .expect_err("init must refuse the config");
+            assert!(
+                err.to_string().contains("owner_resolver_timeout_ms"),
+                "{bad}: refused for the wrong reason: {err}"
+            );
+        }
+    }
 }
