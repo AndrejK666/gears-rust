@@ -41,9 +41,9 @@ impl<R: SettingsRepository> Service<R> {
         &self,
         ctx: &SecurityContext,
     ) -> Result<Vec<NamedSetting>, DomainError> {
-        let (scope, _, _) = self.named_scope(ctx, actions::GET).await?;
+        let (scope, user_id, _) = self.named_scope(ctx, actions::GET).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
-        self.repo.list_named(&conn, &scope).await
+        self.repo.list_named(&conn, &scope, user_id).await
     }
 
     /// One named setting, or `None` if the caller has not set it.
@@ -53,9 +53,9 @@ impl<R: SettingsRepository> Service<R> {
         key: &str,
     ) -> Result<Option<NamedSetting>, DomainError> {
         validate_key(key)?;
-        let (scope, _, _) = self.named_scope(ctx, actions::GET).await?;
+        let (scope, user_id, _) = self.named_scope(ctx, actions::GET).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
-        self.repo.find_named(&conn, &scope, key).await
+        self.repo.find_named(&conn, &scope, user_id, key).await
     }
 
     /// Create or replace one named setting.
@@ -87,8 +87,13 @@ impl<R: SettingsRepository> Service<R> {
         let (scope, user_id, tenant_id) = self.named_scope(ctx, actions::UPDATE).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        if self.repo.find_named(&conn, &scope, key).await?.is_none() {
-            let held = self.repo.count_named(&conn, &scope).await?;
+        if self
+            .repo
+            .find_named(&conn, &scope, user_id, key)
+            .await?
+            .is_none()
+        {
+            let held = self.repo.count_named(&conn, &scope, user_id).await?;
             let limit = self.config.named_settings_per_user;
             if usize::try_from(held).map_or(true, |held| held >= limit) {
                 return Err(DomainError::validation(
@@ -119,9 +124,9 @@ impl<R: SettingsRepository> Service<R> {
         key: &str,
     ) -> Result<bool, DomainError> {
         validate_key(key)?;
-        let (scope, _, _) = self.named_scope(ctx, actions::UPDATE).await?;
+        let (scope, user_id, _) = self.named_scope(ctx, actions::UPDATE).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
-        self.repo.delete_named(&conn, &scope, key).await
+        self.repo.delete_named(&conn, &scope, user_id, key).await
     }
 
     /// The caller's key halves and the scope the PDP grants for `action`.

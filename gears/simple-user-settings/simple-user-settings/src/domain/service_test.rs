@@ -753,4 +753,103 @@ mod tests {
         let fixed = service.get_settings(&ctx).await.expect("read");
         assert_eq!(fixed.theme.as_deref(), Some("dark"));
     }
+
+    /// A PDP that clamps to the caller's tenant and nothing more, as the
+    /// platform's static-authz plugin does. Which user's rows these are is the
+    /// gear's to pin, not the PDP's.
+    struct TenantOnlyAuthZ;
+
+    #[async_trait]
+    impl AuthZResolverApi for TenantOnlyAuthZ {
+        async fn evaluate(
+            &self,
+            _ctx: PlatformSecurityContext,
+            request: EvaluationRequest,
+        ) -> Result<EvaluationResponse, CanonicalError> {
+            let tenant = request
+                .subject
+                .properties
+                .get("tenant_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| CanonicalError::internal("no tenant".to_owned()).create())?;
+            Ok(EvaluationResponse {
+                decision: true,
+                context: EvaluationResponseContext {
+                    constraints: vec![Constraint {
+                        predicates: vec![Predicate::In(InPredicate::new(
+                            pep_properties::OWNER_TENANT_ID,
+                            [tenant],
+                        ))],
+                    }],
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn under_a_tenant_wide_grant_named_settings_stay_the_callers_own() {
+        let repo = Arc::new(SeaOrmSettingsRepository::new());
+        let db: Arc<DBProvider<toolkit_db::DbError>> = Arc::new(DBProvider::new(inmem_db().await));
+        let authz: Arc<dyn AuthZResolverApi> = Arc::new(TenantOnlyAuthZ);
+        let service = Service::new(
+            db,
+            repo,
+            PolicyEnforcer::new(authz),
+            ServiceConfig {
+                named_settings_per_user: 1,
+                ..ServiceConfig::default()
+            },
+        );
+        let org = Uuid::new_v4();
+        let caller = |subject| {
+            SecurityContext::builder()
+                .subject_id(subject)
+                .subject_tenant_id(org)
+                .build()
+                .unwrap()
+        };
+        let me = caller(Uuid::from_u128(1));
+        let colleague = caller(Uuid::from_u128(2));
+
+        service
+            .put_named_setting(&me, "portal.projects.view", serde_json::json!("table"))
+            .await
+            .expect("stored");
+
+        assert!(
+            service
+                .list_named_settings(&colleague)
+                .await
+                .expect("list")
+                .is_empty()
+        );
+        assert_eq!(
+            service
+                .get_named_setting(&colleague, "portal.projects.view")
+                .await
+                .expect("read"),
+            None
+        );
+        assert!(
+            !service
+                .delete_named_setting(&colleague, "portal.projects.view")
+                .await
+                .expect("delete"),
+            "the colleague's delete does not reach my row"
+        );
+        service
+            .put_named_setting(&colleague, "other.key", serde_json::json!(1))
+            .await
+            .expect("my row does not count against the colleague's bound");
+
+        assert!(
+            service
+                .get_named_setting(&me, "portal.projects.view")
+                .await
+                .expect("read")
+                .is_some()
+        );
+    }
 }
