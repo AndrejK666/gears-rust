@@ -124,6 +124,11 @@ reads need `get`, writes and deletes need `update`.
 - **Delete is permanent.** `DELETE` removes the row; there is no tombstone,
   history or undo. Deleting a key that is not set is a no-op that also answers
   `204`.
+- **`PUT` answers `200` either way.** Creating a key and replacing it both return
+  `200` with the stored setting. The operation is an idempotent upsert, and a
+  retried create should see the same answer as the first attempt, not `201` and
+  then `200`; nor should a client need a second success code to handle. A client
+  that needs to know whether the key existed can `GET` it first.
 - **Retries are safe.** `PUT` is an upsert on `(tenant_id, user_id, key)` and
   `DELETE` is idempotent, so a client that got no answer (a timeout, a dropped
   connection) can repeat the same request. The gear itself does not retry. Its
