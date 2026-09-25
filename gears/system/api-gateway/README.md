@@ -102,6 +102,16 @@ are all ordinary content and are accepted. Characters that reorder what a reader
 sees, or end a line for whatever consumes the document, are refused in every
 field regardless.
 
+A declared group is published whether or not anything fills it yet, and
+`/openapi.json` and `/docs` are served without authentication. So staging a
+group ahead of the feature it will describe announces that feature: its name,
+its description and its `external_docs` are readable by anyone who can reach
+the gateway, before a single endpoint exists. That is deliberate — a group that
+vanished from the document because nothing filled it yet would be exactly the
+silent surprise this key exists to remove — but it is a choice worth making on
+purpose rather than discovering. Declare the group when you are ready to talk
+about it.
+
 Omit the key and the document carries no `tags` list, which is what it did
 before the key existed: documentation browsers then fall back to the order the
 tags first appear in, which in an assembly is whatever the path alphabet

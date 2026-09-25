@@ -710,6 +710,14 @@ pub fn validate_document_metadata(
 /// occasionally deliberate, and dropping it silently would be its own surprise
 /// — but it is logged, because the overwhelmingly likely cause is a typo in a
 /// name that is matched by exact string equality.
+///
+/// That cuts both ways, and the other edge is worth stating: what is emitted is
+/// served anonymously. A group declared ahead of the endpoints it will describe
+/// publishes its name, its description and its `externalDocs` on
+/// `/openapi.json` and `/docs` before anything implements it. Declaring a group
+/// is therefore a decision to announce it, which is the operator's to make —
+/// but it is a decision, so the README says so rather than leaving it to be
+/// discovered.
 fn document_tags(
     declared: &[OpenApiTag],
     in_use: &BTreeSet<String>,
@@ -2194,6 +2202,62 @@ mod tests {
                 .is_err(),
             "it is bounded like the url beside it and the description above it"
         );
+    }
+
+    /// The aggregate cap, from both sides, like every other bound here.
+    ///
+    /// Landing on the byte exactly takes some construction: the list is filled
+    /// with full-size groups while another certainly fits, and then one last
+    /// group's `x-note` is sized to whatever room is left. An extension value
+    /// may be up to `MAX_EXTENSION_VALUE_LEN`, which is more than a whole
+    /// group costs, so the remainder is always reachable with one of them.
+    #[test]
+    fn the_declared_list_byte_cap_is_enforced_at_the_boundary() {
+        let filler = "d".repeat(MAX_TAG_DESCRIPTION_LEN);
+        let len_of = |tags: &[OpenApiTag]| serde_json::to_string(tags).unwrap().len();
+        let bulk = |i: usize| {
+            OpenApiTag::new(format!("Bulk{i}"))
+                .unwrap()
+                .with_description(filler.as_str())
+                .unwrap()
+                .with_extension("x-note", serde_json::json!(filler.as_str()))
+                .unwrap()
+        };
+
+        let mut tags: Vec<OpenApiTag> = Vec::new();
+        while MAX_DECLARED_TAGS_BYTES - len_of(&tags) > 2 * MAX_TAG_DESCRIPTION_LEN + 128 {
+            tags.push(bulk(tags.len()));
+        }
+
+        // What an `x-note` costs in syntax, measured rather than counted.
+        let syntax = r#","extensions":{"x-note":""}"#.len();
+        tags.push(OpenApiTag::new("Last").unwrap());
+        let room = MAX_DECLARED_TAGS_BYTES - len_of(&tags) - syntax;
+        let fill = |tags: &mut Vec<OpenApiTag>, bytes: usize| {
+            tags.last_mut()
+                .unwrap()
+                .extensions
+                .insert("x-note".to_owned(), serde_json::json!("n".repeat(bytes)));
+        };
+
+        fill(&mut tags, room);
+        assert_eq!(
+            len_of(&tags),
+            MAX_DECLARED_TAGS_BYTES,
+            "this is only a boundary test if the list is exactly at the cap"
+        );
+        assert!(
+            tags.len() <= MAX_DECLARED_TAGS,
+            "and only if the count cap is not what would refuse it"
+        );
+        assert!(
+            validate_tags(&tags).is_ok(),
+            "a list exactly at the cap is within it"
+        );
+
+        fill(&mut tags, room + 1);
+        assert_eq!(len_of(&tags), MAX_DECLARED_TAGS_BYTES + 1);
+        assert!(validate_tags(&tags).is_err(), "one byte past it is past it");
     }
 
     /// Every group can be within every one of its bounds and the list still be
