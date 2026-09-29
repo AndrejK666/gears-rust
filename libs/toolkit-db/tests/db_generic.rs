@@ -188,7 +188,8 @@ async fn run_outbox_reapply_suite(database_url: &str) -> Result<()> {
     )
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    assert_eq!(first.applied, 1, "first run should create the schema");
+    let count = toolkit_db::outbox::outbox_migrations().len();
+    assert_eq!(first.applied, count, "first run should create the schema");
 
     // Same DDL, fresh migration history -> re-executed against the schema the
     // first run just built. Fails on the very first index without idempotent
@@ -201,7 +202,7 @@ async fn run_outbox_reapply_suite(database_url: &str) -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     assert_eq!(
-        second.applied, 1,
+        second.applied, count,
         "second run must actually re-execute the DDL, not skip it"
     );
     assert_eq!(second.skipped, 0);
