@@ -84,6 +84,61 @@ impl MigrationTrait for CreateOutboxSchema {
     }
 }
 
+/// Brings an outbox schema created by toolkit-db 0.15 or earlier up to the shape
+/// the trace-carrying runtime (0.16+) reads and writes.
+///
+/// 0.16 added the `trace` column to the body and dead-letter tables and the
+/// trace table with its three indexes by editing [`CreateOutboxSchema`] in
+/// place. A database that had already recorded that migration never re-runs
+/// it, so it kept the old shape and every enqueue failed on the missing
+/// `trace` column (constructorfabric/gears-rust#5044). This migration adds what
+/// is missing and nothing else.
+///
+/// # Idempotency
+///
+/// On a database [`CreateOutboxSchema`] created at 0.16+, everything already
+/// exists and this is a no-op: each column is added only when absent (`ADD
+/// COLUMN IF NOT EXISTS` on Postgres, a catalog probe on `SQLite` and `MySQL`,
+/// which have no such syntax), and the trace table and its indexes go through
+/// the same `IF NOT EXISTS` DDL [`CreateOutboxSchema`] uses.
+struct AddOutboxTrace {
+    tables: OutboxTables,
+}
+
+impl MigrationName for AddOutboxTrace {
+    fn name(&self) -> &str {
+        self.tables.trace_migration_name()
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddOutboxTrace {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let conn = manager.get_connection();
+        let backend = conn.get_database_backend();
+        let tables = &self.tables;
+
+        let definition = trace_column_definition(backend)?;
+        for table in [tables.body(), tables.dead_letters()] {
+            let spec = ColumnSpec {
+                table,
+                column: "trace",
+                definition,
+            };
+            add_column_if_absent(conn, backend, &spec).await?;
+        }
+        create_trace(conn, backend, tables).await
+    }
+
+    /// Deliberately a no-op. On a database created at 0.16+ the columns and
+    /// the table belong to [`CreateOutboxSchema`], so dropping them here would
+    /// leave that migration recorded but incomplete; its own `down` removes
+    /// them together with the rest of the schema.
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
+    }
+}
+
 /// Error for a database backend the outbox schema has no DDL for.
 ///
 /// `DatabaseBackend` is `#[non_exhaustive]` as of `SeaORM` 2.0, so every DDL
@@ -126,21 +181,24 @@ const MYSQL_INDEX_PROBE_SQL: &str = "SELECT 1 FROM information_schema.STATISTICS
      WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? \
      LIMIT 1";
 
-/// How to create one index idempotently on one backend.
+/// How to run one piece of DDL idempotently on one backend: create an index,
+/// or add a column.
 ///
 /// Separating the plan from its execution keeps every per-backend decision --
 /// which engines support `IF NOT EXISTS`, whether a partial filter survives,
 /// whether the probe binds parameters -- assertable without a live database.
 #[derive(Debug, PartialEq, Eq)]
-enum IndexPlan {
-    /// Backend supports `CREATE INDEX IF NOT EXISTS`: one statement, no pre-check.
-    Guarded { create: String },
-    /// Backend has no such syntax: probe for the index, create it only if absent.
-    ProbeThenCreate {
+enum DdlPlan {
+    /// Backend supports `IF NOT EXISTS` for this DDL: one statement, no pre-check.
+    Guarded { ddl: String },
+    /// Backend has no such syntax: probe the catalog, run the DDL only if the
+    /// probe finds nothing.
+    ProbeThenRun {
         probe_sql: &'static str,
-        /// `[table, index_name]`, bound to the probe's placeholders in order.
+        /// `[table, index or column name]`, bound to the probe's placeholders
+        /// in order.
         probe_args: [String; 2],
-        create: String,
+        ddl: String,
     },
 }
 
@@ -153,7 +211,7 @@ enum IndexPlan {
 /// `DatabaseBackend::MySql` does not distinguish, and whose `IF NOT EXISTS`
 /// support differs. The check-then-create race is irrelevant here: the migration
 /// runner does not run two migrations against one schema at once.
-fn plan_create_index(backend: DatabaseBackend, spec: &IndexSpec<'_>) -> Result<IndexPlan, DbErr> {
+fn plan_create_index(backend: DatabaseBackend, spec: &IndexSpec<'_>) -> Result<DdlPlan, DbErr> {
     let unique = if spec.unique { "UNIQUE " } else { "" };
     // Appended verbatim on every backend. Only the Postgres call sites pass a
     // filter; a backend that cannot express one must fail loudly rather than
@@ -164,13 +222,13 @@ fn plan_create_index(backend: DatabaseBackend, spec: &IndexSpec<'_>) -> Result<I
     let tail = format!("{} ON {} ({}){filter}", spec.name, spec.table, spec.columns);
 
     match backend {
-        DatabaseBackend::Postgres | DatabaseBackend::Sqlite => Ok(IndexPlan::Guarded {
-            create: format!("CREATE {unique}INDEX IF NOT EXISTS {tail}"),
+        DatabaseBackend::Postgres | DatabaseBackend::Sqlite => Ok(DdlPlan::Guarded {
+            ddl: format!("CREATE {unique}INDEX IF NOT EXISTS {tail}"),
         }),
-        DatabaseBackend::MySql => Ok(IndexPlan::ProbeThenCreate {
+        DatabaseBackend::MySql => Ok(DdlPlan::ProbeThenRun {
             probe_sql: MYSQL_INDEX_PROBE_SQL,
             probe_args: [spec.table.to_owned(), spec.name.to_owned()],
-            create: format!("CREATE {unique}INDEX {tail}"),
+            ddl: format!("CREATE {unique}INDEX {tail}"),
         }),
         _ => Err(unsupported_backend(backend)),
     }
@@ -184,28 +242,102 @@ async fn create_index_if_absent(
     backend: DatabaseBackend,
     spec: &IndexSpec<'_>,
 ) -> Result<(), DbErr> {
-    match plan_create_index(backend, spec)? {
-        IndexPlan::Guarded { create } => {
-            conn.execute_raw(Statement::from_string(backend, create))
+    run_plan(conn, backend, plan_create_index(backend, spec)?).await
+}
+
+/// One column to add to an existing table.
+struct ColumnSpec<'a> {
+    table: &'a str,
+    column: &'a str,
+    /// Type and nullability, exactly as they follow the column name.
+    definition: &'a str,
+}
+
+/// Looks up one column by name in an `SQLite` table. `pragma_table_info` takes
+/// the table name as an ordinary bindable argument.
+const SQLITE_COLUMN_PROBE_SQL: &str = "SELECT 1 FROM pragma_table_info(?) WHERE name = ? LIMIT 1";
+
+/// Looks up one column by name in the current `MySQL` schema. Bound, not
+/// interpolated, for the same reason as [`MYSQL_INDEX_PROBE_SQL`].
+const MYSQL_COLUMN_PROBE_SQL: &str = "SELECT 1 FROM information_schema.COLUMNS \
+     WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? \
+     LIMIT 1";
+
+/// Decide how to add `spec` to its table on `backend`.
+///
+/// Postgres has `ADD COLUMN IF NOT EXISTS`. `SQLite` and `MySQL` do not (only
+/// `MariaDB` does, and `DatabaseBackend::MySql` does not tell the two apart), so
+/// both probe their catalog first.
+fn plan_add_column(backend: DatabaseBackend, spec: &ColumnSpec<'_>) -> Result<DdlPlan, DbErr> {
+    let ColumnSpec {
+        table,
+        column,
+        definition,
+    } = spec;
+    let probe = |probe_sql| DdlPlan::ProbeThenRun {
+        probe_sql,
+        probe_args: [(*table).to_owned(), (*column).to_owned()],
+        ddl: format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+    };
+    match backend {
+        DatabaseBackend::Postgres => Ok(DdlPlan::Guarded {
+            ddl: format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}"),
+        }),
+        DatabaseBackend::Sqlite => Ok(probe(SQLITE_COLUMN_PROBE_SQL)),
+        DatabaseBackend::MySql => Ok(probe(MYSQL_COLUMN_PROBE_SQL)),
+        _ => Err(unsupported_backend(backend)),
+    }
+}
+
+/// Add a column, skipping it if the table already has one of that name.
+///
+/// Thin executor over [`plan_add_column`], which owns the per-backend logic.
+async fn add_column_if_absent(
+    conn: &DatabaseExecutor<'_>,
+    backend: DatabaseBackend,
+    spec: &ColumnSpec<'_>,
+) -> Result<(), DbErr> {
+    run_plan(conn, backend, plan_add_column(backend, spec)?).await
+}
+
+/// The `trace` column's type as [`CreateOutboxSchema`] declares it on the body
+/// and dead-letter tables. Kept identical so an upgraded schema matches a
+/// fresh one.
+fn trace_column_definition(backend: DatabaseBackend) -> Result<&'static str, DbErr> {
+    match backend {
+        DatabaseBackend::Postgres => Ok("VARCHAR(256) NULL"),
+        DatabaseBackend::Sqlite => Ok("TEXT NULL"),
+        DatabaseBackend::MySql => Ok("VARCHAR(256) CHARACTER SET ascii NULL"),
+        _ => Err(unsupported_backend(backend)),
+    }
+}
+
+/// Execute a [`DdlPlan`]: the guarded statement as is, or the probe and then
+/// the DDL only when the probe returned no row.
+async fn run_plan(
+    conn: &DatabaseExecutor<'_>,
+    backend: DatabaseBackend,
+    plan: DdlPlan,
+) -> Result<(), DbErr> {
+    match plan {
+        DdlPlan::Guarded { ddl } => {
+            conn.execute_raw(Statement::from_string(backend, ddl))
                 .await?;
         }
-        IndexPlan::ProbeThenCreate {
+        DdlPlan::ProbeThenRun {
             probe_sql,
-            probe_args: [table, index_name],
-            create,
+            probe_args: [table, name],
+            ddl,
         } => {
             let existing = conn
                 .query_one_raw(Statement::from_sql_and_values(
                     backend,
                     probe_sql,
-                    [
-                        sea_orm::Value::from(table),
-                        sea_orm::Value::from(index_name),
-                    ],
+                    [sea_orm::Value::from(table), sea_orm::Value::from(name)],
                 ))
                 .await?;
             if existing.is_none() {
-                conn.execute_raw(Statement::from_string(backend, create))
+                conn.execute_raw(Statement::from_string(backend, ddl))
                     .await?;
             }
         }
@@ -851,10 +983,22 @@ fn mysql_seed_id_sequence_sql(table: &str) -> String {
     format!("INSERT IGNORE INTO {table} (slot, next_id) VALUES (1, 1)")
 }
 
+/// The outbox migrations for one table family, in dependency order.
+///
+/// Every migration here is shipped and recorded as applied on live databases:
+/// a schema change is a new migration appended here, never an edit to an
+/// existing one (see [`AddOutboxTrace`] for what an edit costs).
+fn migrations_for(tables: OutboxTables) -> Vec<Box<dyn MigrationTrait>> {
+    vec![
+        Box::new(CreateOutboxSchema::new(tables.clone())),
+        Box::new(AddOutboxTrace { tables }),
+    ]
+}
+
 /// Returns all outbox migrations in dependency order.
 #[must_use]
 pub fn outbox_migrations() -> Vec<Box<dyn MigrationTrait>> {
-    vec![Box::new(CreateOutboxSchema::default())]
+    migrations_for(OutboxTables::default())
 }
 
 /// Returns all outbox migrations for a custom table prefix in dependency order.
@@ -866,8 +1010,7 @@ pub fn outbox_migrations() -> Vec<Box<dyn MigrationTrait>> {
 pub fn outbox_migrations_with_prefix(
     prefix: impl Into<String>,
 ) -> Result<Vec<Box<dyn MigrationTrait>>, OutboxError> {
-    let tables = OutboxTables::new(prefix)?;
-    Ok(vec![Box::new(CreateOutboxSchema::new(tables))])
+    Ok(migrations_for(OutboxTables::new(prefix)?))
 }
 
 #[cfg(test)]
@@ -881,6 +1024,83 @@ mod tests {
         let migrations = outbox_migrations();
 
         assert_eq!(migrations[0].name(), DEFAULT_OUTBOX_MIGRATION_NAME);
+    }
+
+    #[test]
+    fn the_trace_upgrade_follows_the_schema_migration_for_every_prefix() {
+        // m001 is recorded as applied on every database an earlier toolkit-db
+        // created, so the 0.16 schema has to arrive as a second migration --
+        // named after m001's scheme, so it sorts after it in the gear journal.
+        let names = |migrations: Vec<Box<dyn MigrationTrait>>| -> Vec<String> {
+            migrations.iter().map(|m| m.name().to_owned()).collect()
+        };
+
+        assert_eq!(
+            names(outbox_migrations()),
+            [
+                "m001_create_toolkit_outbox_schema",
+                "m002_add_toolkit_outbox_trace"
+            ]
+        );
+        assert_eq!(
+            names(outbox_migrations_with_prefix("mini_chat_outbox").unwrap()),
+            [
+                "m001_create_toolkit_outbox_schema__mini_chat_outbox",
+                "m002_add_toolkit_outbox_trace__mini_chat_outbox"
+            ]
+        );
+    }
+
+    fn trace_column_plan(backend: DatabaseBackend) -> DdlPlan {
+        let spec = ColumnSpec {
+            table: "toolkit_outbox_body",
+            column: "trace",
+            definition: trace_column_definition(backend).unwrap(),
+        };
+        plan_add_column(backend, &spec).unwrap()
+    }
+
+    #[test]
+    fn plan_add_column_is_guarded_on_postgres() {
+        assert_eq!(
+            trace_column_plan(DatabaseBackend::Postgres),
+            DdlPlan::Guarded {
+                ddl: "ALTER TABLE toolkit_outbox_body ADD COLUMN IF NOT EXISTS trace \
+                      VARCHAR(256) NULL"
+                    .to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn plan_add_column_probes_where_there_is_no_if_not_exists() {
+        // Neither SQLite nor MySQL accepts ADD COLUMN IF NOT EXISTS, so the
+        // guard is a bound catalog probe and the ALTER itself is plain.
+        for (backend, probe, ddl) in [
+            (
+                DatabaseBackend::Sqlite,
+                SQLITE_COLUMN_PROBE_SQL,
+                "ALTER TABLE toolkit_outbox_body ADD COLUMN trace TEXT NULL",
+            ),
+            (
+                DatabaseBackend::MySql,
+                MYSQL_COLUMN_PROBE_SQL,
+                "ALTER TABLE toolkit_outbox_body ADD COLUMN trace \
+                 VARCHAR(256) CHARACTER SET ascii NULL",
+            ),
+        ] {
+            assert_eq!(
+                trace_column_plan(backend),
+                DdlPlan::ProbeThenRun {
+                    probe_sql: probe,
+                    probe_args: ["toolkit_outbox_body".to_owned(), "trace".to_owned()],
+                    ddl: ddl.to_owned(),
+                },
+                "{backend:?}"
+            );
+            assert_eq!(probe.matches('?').count(), 2, "probe: {probe}");
+            assert!(!probe.contains("toolkit_outbox_body"), "probe: {probe}");
+        }
     }
 
     #[test]
@@ -944,14 +1164,14 @@ mod tests {
         DatabaseBackend::Sqlite,
     ];
 
-    fn plan(backend: DatabaseBackend, spec: &IndexSpec<'_>) -> IndexPlan {
+    fn plan(backend: DatabaseBackend, spec: &IndexSpec<'_>) -> DdlPlan {
         plan_create_index(backend, spec).unwrap()
     }
 
-    /// The `create` statement of a plan, whichever variant it is.
-    fn create_sql(plan: &IndexPlan) -> &str {
+    /// The DDL statement of a plan, whichever variant it is.
+    fn create_sql(plan: &DdlPlan) -> &str {
         match plan {
-            IndexPlan::Guarded { create } | IndexPlan::ProbeThenCreate { create, .. } => create,
+            DdlPlan::Guarded { ddl: create } | DdlPlan::ProbeThenRun { ddl: create, .. } => create,
         }
     }
 
@@ -973,7 +1193,7 @@ mod tests {
         for backend in BACKENDS {
             let spec = simple_spec("idx_x", "tbl");
             match plan(backend, &spec) {
-                IndexPlan::Guarded { create } => {
+                DdlPlan::Guarded { ddl: create } => {
                     assert!(
                         matches!(backend, DatabaseBackend::Postgres | DatabaseBackend::Sqlite),
                         "{backend:?} should not use the guarded path"
@@ -983,10 +1203,10 @@ mod tests {
                         "{backend:?} guarded DDL must be conditional, got: {create}"
                     );
                 }
-                IndexPlan::ProbeThenCreate {
+                DdlPlan::ProbeThenRun {
                     probe_sql,
                     probe_args,
-                    create,
+                    ddl: create,
                 } => {
                     assert_eq!(
                         backend,
@@ -1012,7 +1232,7 @@ mod tests {
         // They are compared as values against information_schema, so they must
         // stay bound to the two placeholders.
         let spec = simple_spec("idx_dl_status_deadline", "toolkit_outbox_dead_letters");
-        let IndexPlan::ProbeThenCreate {
+        let DdlPlan::ProbeThenRun {
             probe_sql,
             probe_args,
             ..

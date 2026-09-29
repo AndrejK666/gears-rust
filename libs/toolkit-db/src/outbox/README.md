@@ -43,7 +43,74 @@ let handle = Outbox::builder(db)
 
 Changing the prefix points the outbox at a different table family. It does not
 rename tables or move existing rows. To move data between prefixes, drain or
-migrate the rows explicitly.
+migrate the rows explicitly (see [Changing the prefix of a live
+outbox](#changing-the-prefix-of-a-live-outbox)).
+
+### Schema migrations and upgrades
+
+`outbox_migrations()` / `outbox_migrations_with_prefix(p)` return every outbox
+migration in order. Their names follow one scheme: the default prefix uses the
+bare name, any other prefix appends `__<prefix>`, so several outboxes can share
+one gear's migration journal.
+
+| Migration | What it does |
+|-----------|--------------|
+| `m001_create_toolkit_outbox_schema[__<prefix>]` | Creates the whole table family (`IF NOT EXISTS`, safe to re-run). |
+| `m002_add_toolkit_outbox_trace[__<prefix>]` | Brings a family an earlier `m001` created up to the traced-batch shape: adds `trace` to `<prefix>_body` and `<prefix>_dead_letters` if missing, creates `<prefix>_trace` and its `trace_mail` / `trace_retrying` / `trace_key` indexes if missing. A no-op on a family `m001` created at 0.16 or later. |
+
+**Upgrading from toolkit-db 0.15 or earlier.** 0.16.0–0.16.2 added the trace
+columns and table by editing `m001` in place, so a database whose journal
+already recorded `m001` never received them and every enqueue failed with
+`column "trace" of relation "<prefix>_body" does not exist`
+(constructorfabric/gears-rust#5044). `m002` repairs that on the next start, with
+no manual step. Hand-applied workarounds (adding `trace` to the body table,
+deleting the `m001` journal row so it re-runs) are compatible with it: `m002`
+only adds what is still missing - typically `<prefix>_dead_letters.trace`,
+which re-running `m001` cannot add and without which dead-lettering fails - and
+they can be removed once the gear runs a toolkit-db that ships `m002`.
+
+A shipped migration is never edited: a schema change is always a new migration
+appended to the list.
+
+### Changing the prefix of a live outbox
+
+A new prefix creates a new, empty table family. The tables under the old prefix
+are not renamed, dropped or read any more, and any message still in them is
+never delivered. types-registry did this in the same release as the 0.16
+outbox (`types_registry_outbox` -> `types_registry__outbox`); any gear that
+changes its prefix is in the same position. Nothing drops or moves the old
+tables automatically, on purpose: whether their messages still matter is the
+gear's decision.
+
+To find what was left behind under an old prefix `<old>`:
+
+```sql
+-- enqueued, never sequenced
+SELECT count(*) FROM <old>_incoming;
+-- sequenced, not yet processed
+SELECT count(*) FROM <old>_outgoing o
+  JOIN <old>_processor p ON p.partition_id = o.partition_id
+ WHERE o.seq > p.processed_seq;
+-- dead letters still awaiting a decision
+SELECT count(*) FROM <old>_dead_letters WHERE status IN ('pending', 'reprocessing');
+```
+
+If all three are zero, the old family can be dropped by hand. Otherwise, drain
+it first, in one of two ways:
+
+- **Before the upgrade:** stop enqueueing and let the old version run until the
+  queries above return zero.
+- **After the upgrade:** apply `outbox_migrations_with_prefix("<old>")` (which
+  also brings the old family up to date through `m002`) and start a temporary
+  outbox with `.table_prefix("<old>")?` and the same queues and handler until
+  the queries return zero. If the handler must not see a message twice, read
+  the payloads from `<old>_body` (joined through `<old>_incoming` /
+  `<old>_outgoing`) and re-enqueue them into the new prefix instead.
+
+Then drop the old tables, children first for the foreign keys:
+`<old>_incoming`, `<old>_outgoing`, `<old>_dead_letters`, `<old>_processor`,
+`<old>_vacuum_counter`, `<old>_partitions`, `<old>_body`, `<old>_trace` (if
+present), and on MySQL `<old>_body_id_sequence` and `<old>_incoming_id_sequence`.
 
 Prefixes are validated before SQL is generated: they must be non-empty ASCII
 identifiers, start with a letter, contain only letters, digits, and underscores,

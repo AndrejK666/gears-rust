@@ -2,6 +2,11 @@ use super::types::OutboxError;
 
 pub const DEFAULT_OUTBOX_TABLE_PREFIX: &str = "toolkit_outbox";
 pub const DEFAULT_OUTBOX_MIGRATION_NAME: &str = "m001_create_toolkit_outbox_schema";
+/// Brings a schema an earlier `m001` created up to the trace-carrying shape.
+///
+/// A separate migration because `m001` is recorded as applied on every
+/// database that ran it, so edits to it never reach those databases.
+pub const DEFAULT_OUTBOX_TRACE_MIGRATION_NAME: &str = "m002_add_toolkit_outbox_trace";
 
 const MAX_IDENTIFIER_LEN: usize = 63;
 const MAX_PREFIX_LEN: usize = 36;
@@ -30,6 +35,7 @@ pub struct OutboxTables {
     idx_trace_retrying: String,
     idx_trace_key: String,
     migration_name: String,
+    trace_migration_name: String,
 }
 
 impl Default for OutboxTables {
@@ -67,7 +73,8 @@ impl OutboxTables {
             idx_trace_mail: indexed(&prefix, "trace_mail"),
             idx_trace_retrying: indexed(&prefix, "trace_retrying"),
             idx_trace_key: indexed(&prefix, "trace_key"),
-            migration_name: migration_name(&prefix),
+            migration_name: migration_name(DEFAULT_OUTBOX_MIGRATION_NAME, &prefix),
+            trace_migration_name: migration_name(DEFAULT_OUTBOX_TRACE_MIGRATION_NAME, &prefix),
             prefix,
         };
 
@@ -178,6 +185,10 @@ impl OutboxTables {
         &self.migration_name
     }
 
+    pub(crate) fn trace_migration_name(&self) -> &str {
+        &self.trace_migration_name
+    }
+
     fn validate_derived_identifiers(&self) -> Result<(), OutboxError> {
         for ident in [
             self.body(),
@@ -240,11 +251,13 @@ fn indexed(prefix: &str, suffix: &str) -> String {
     format!("idx_{prefix}_{suffix}")
 }
 
-fn migration_name(prefix: &str) -> String {
+/// The default outbox keeps the bare name; any other prefix gets `__<prefix>`
+/// appended, so two outboxes in one gear journal never share a name.
+fn migration_name(base: &str, prefix: &str) -> String {
     if prefix == DEFAULT_OUTBOX_TABLE_PREFIX {
-        DEFAULT_OUTBOX_MIGRATION_NAME.to_owned()
+        base.to_owned()
     } else {
-        format!("{DEFAULT_OUTBOX_MIGRATION_NAME}__{prefix}")
+        format!("{base}__{prefix}")
     }
 }
 
@@ -364,6 +377,25 @@ mod tests {
         let tables = OutboxTables::default();
 
         assert_eq!(tables.migration_name(), DEFAULT_OUTBOX_MIGRATION_NAME);
+        assert_eq!(
+            tables.trace_migration_name(),
+            DEFAULT_OUTBOX_TRACE_MIGRATION_NAME
+        );
+    }
+
+    #[test]
+    fn trace_migration_name_follows_the_schema_migration_scheme() {
+        let tables = OutboxTables::new("mini_chat_outbox").unwrap();
+
+        assert_eq!(
+            tables.trace_migration_name(),
+            "m002_add_toolkit_outbox_trace__mini_chat_outbox"
+        );
+        // The runner applies a journal's migrations in name order: the upgrade
+        // must come after the schema it upgrades, for every prefix.
+        assert!(tables.migration_name() < tables.trace_migration_name());
+        let default = OutboxTables::default();
+        assert!(default.migration_name() < default.trace_migration_name());
     }
 
     #[test]
