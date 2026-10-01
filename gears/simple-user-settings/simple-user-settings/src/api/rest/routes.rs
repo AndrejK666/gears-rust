@@ -42,6 +42,7 @@ pub fn register_routes(
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     router = OperationBuilder::post("/simple-user-settings/v1/settings")
@@ -63,6 +64,7 @@ pub fn register_routes(
         .error_403(openapi)
         .error_422(openapi)
         .error_500(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     router = OperationBuilder::patch("/simple-user-settings/v1/settings")
@@ -84,6 +86,7 @@ pub fn register_routes(
         .error_403(openapi)
         .error_422(openapi)
         .error_500(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     let body_limit = named_body_limit(service.named_value_max_bytes());
@@ -125,6 +128,7 @@ fn register_named_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     router = OperationBuilder::get("/simple-user-settings/v1/named-settings/{key}")
@@ -142,6 +146,7 @@ fn register_named_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .error_403(openapi)
         .error_404(openapi)
         .error_500(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     router = OperationBuilder::put("/simple-user-settings/v1/named-settings/{key}")
@@ -169,6 +174,7 @@ fn register_named_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .error_422(openapi)
         .error_429(openapi)
         .error_500(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     router = OperationBuilder::delete("/simple-user-settings/v1/named-settings/{key}")
@@ -185,6 +191,7 @@ fn register_named_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     router = OperationBuilder::delete("/simple-user-settings/v1/named-settings")
@@ -203,6 +210,7 @@ fn register_named_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     router
