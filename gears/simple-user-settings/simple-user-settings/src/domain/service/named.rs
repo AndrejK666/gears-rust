@@ -169,12 +169,16 @@ impl<R: SettingsRepository> Service<R> {
     }
 
     /// The caller's key halves and the scope the PDP grants for `action`.
+    ///
+    /// The user half comes from [`Self::owner_of`], like the fixed fields', so
+    /// a deployment's resolver files a person's named settings and their
+    /// theme under the same key.
     async fn named_scope(
         &self,
         ctx: &SecurityContext,
         action: &str,
     ) -> Result<(AccessScope, Uuid, Uuid), DomainError> {
-        let user_id = ctx.subject_id();
+        let user_id = self.owner_of(ctx, action).await?;
         let tenant_id = ctx.subject_tenant_id();
         let scope = self
             .policy_enforcer

@@ -310,6 +310,51 @@ mod tests {
         assert_eq!(seen, patched);
     }
 
+    /// Named settings are filed under the resolved person too, so a key one
+    /// login writes is the key another login reads — the same rule as `theme`.
+    #[tokio::test]
+    async fn named_settings_follow_the_resolved_person() {
+        let person = Uuid::new_v4();
+        let resolver = OnePerson::new(Some(person));
+        let service = resolving_with(resolver.clone()).await;
+
+        let org = Uuid::new_v4();
+        let email_login = caller(Uuid::from_u128(1), org);
+        let github_login = caller(Uuid::from_u128(2), org);
+
+        service
+            .put_named_setting(
+                &email_login,
+                "portal.projects.view",
+                serde_json::json!("table"),
+            )
+            .await
+            .expect("stored under the person");
+
+        let seen = service
+            .get_named_setting(&github_login, "portal.projects.view")
+            .await
+            .expect("read under the person");
+        assert_eq!(
+            seen.map(|s| s.value),
+            Some(serde_json::json!("table")),
+            "the other login sees the person's key"
+        );
+        assert_eq!(
+            service
+                .list_named_settings(&github_login)
+                .await
+                .expect("list")
+                .len(),
+            1
+        );
+        assert_eq!(
+            resolver.asked().len(),
+            3,
+            "every named call asks the resolver"
+        );
+    }
+
     /// The resolver answers the user half of the key only; the tenant still
     /// separates one person's settings in two organizations.
     #[tokio::test]
