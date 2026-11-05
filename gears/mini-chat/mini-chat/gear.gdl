@@ -49,10 +49,12 @@ gear(
         ),
     ],
 
-    # The two top-level scalars. Everything else in `MiniChatConfig` is a
-    # nested section -- providers, quotas, workers, streaming -- and stays in
-    # the configuration file.
-    config_schema = config(exposes = ["url_prefix", "vendor"]),
+    # The two top-level scalars, plus the two nested sections a product cannot
+    # start without: `client_credentials`, the service identity the gear
+    # exchanges at start, and `providers`, the LLM backends. Quotas, workers
+    # and streaming keep their defaults and stay in the configuration file.
+    # The client secret is a `SecretString`: only a `${NAME}` may be written.
+    config_schema = config(exposes = ["url_prefix", "vendor", "client_credentials", "providers"]),
 
     # Kubernetes Lease leader election for the background workers. A build
     # with it *requires* a Kubernetes runtime: startup fails without

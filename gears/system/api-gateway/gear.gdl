@@ -38,8 +38,10 @@ gear(
     serves = [endpoint(name = "rest", config_key = "bind_addr", default_port = 8087)],
 
     # Includes structured discovery and platform-auth settings so prepared
-    # products can declare them without losing them during generation.
-    config_schema = config(exposes = ["bind_addr", "enable_docs", "cors_enabled", "prefix_path", "auth_disabled", "advertise_uri", "gateway_proxy", "internal_auth", "route_policies"]),
+    # products can declare them without losing them during generation. The
+    # throttling zones are named by gears' operations (mini-chat's chat), and
+    # the gateway refuses to start when a named zone is not configured.
+    config_schema = config(exposes = ["bind_addr", "enable_docs", "cors_enabled", "prefix_path", "auth_disabled", "advertise_uri", "gateway_proxy", "internal_auth", "route_policies", "rate_limit_zones", "in_flight_limit_zones"]),
 
     # Every one of these is a product decision. `k8s-auth` is the exception that
     # needs a kind: it authenticates against a Kubernetes service account.
