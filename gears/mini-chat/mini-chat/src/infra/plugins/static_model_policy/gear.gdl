@@ -27,7 +27,8 @@ gear(
 
     implements = "cf.core.mini_chat_model_policy.plugin.v1~",
 
-    # The model catalogue, kill switches and tier limits are nested records and
+    # The model catalogue is offered: without it the plugin has no model to
+    # hand mini-chat. Kill switches and tier limits are nested records and
     # stay in the configuration file.
-    config_schema = config(exposes = ["vendor", "priority"]),
+    config_schema = config(exposes = ["vendor", "priority", "model_catalog"]),
 )

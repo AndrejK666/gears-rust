@@ -58,7 +58,10 @@ gear(
     # a gear that resolves the root at post-init (oagw) fails with "tenant not
     # found" (#5328, #4774). Neither is required by the struct, so a product's
     # configuration has to be able to carry them.
-    config_schema = config(exposes = ["root_tenant_type", "bootstrap"]),
+    # `tr_plugin` registers AM as the tenant resolver's plugin. It is off by
+    # default, and without it a product that links no other resolver plugin
+    # cannot resolve the root its gears ask for at post-init.
+    config_schema = config(exposes = ["root_tenant_type", "bootstrap", "tr_plugin"]),
 
     # Deliberately empty rather than absent: the crate's only feature is
     # `integration`, which spins up Postgres in Docker per test. "Nothing here
