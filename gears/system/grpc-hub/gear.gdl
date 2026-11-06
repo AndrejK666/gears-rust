@@ -26,7 +26,7 @@ gear(
 
     # GrpcHubConfig lives in src/gear.rs, not src/config.rs -- the struct is found
     # from the ctx.config*() call, so its placement costs nothing here.
-    config_schema = config(exposes = ["listen_addr", "advertise_addr", "internal_auth_cache_ttl_secs"]),
+    config_schema = config(exposes = ["listen_addr", "advertise_addr", "internal_auth", "internal_auth_enforcement", "internal_auth_cache_ttl_secs"]),
 
     # `default` is Cargo's, not a choice an integrator makes. `k8s-auth` reads a
     # service-account token from a path that exists only inside a pod, so it is
