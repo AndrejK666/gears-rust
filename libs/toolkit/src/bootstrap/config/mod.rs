@@ -124,6 +124,11 @@ pub struct AppConfig {
     /// instead of the legacy gRPC-only lifecycle (`cpt-cf-component-oop-bootstrap`).
     #[serde(default)]
     pub oop_http: Option<OopHttpConfig>,
+    /// A host process's outbound platform credential, as Gearbox writes it
+    /// for every process of a product whose gateway sets one. Accepted so
+    /// such a config deserializes; a worker carries its own under `oop_http`.
+    #[serde(default)]
+    pub internal_auth: Option<toolkit_security::InternalAuthConfig>,
 }
 
 impl Default for AppConfig {
@@ -138,6 +143,7 @@ impl Default for AppConfig {
             gears: HashMap::new(),
             vendor: VendorConfig::new(),
             oop_http: None,
+            internal_auth: None,
         }
     }
 }
